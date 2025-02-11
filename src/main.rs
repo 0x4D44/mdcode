@@ -437,11 +437,28 @@ fn diff_command(dir: &str, versions: &Vec<i32>, dry_run: bool) -> Result<(), Box
 
     log::info!("{}Comparing {} with {}{}", YELLOW, before_timestamp, after_timestamp_str, RESET);
 
-    if let Err(e) = Command::new("WinMergeU.exe")
+    // Attempt to launch WinMergeU; if it fails, try Windiff.
+    match Command::new("WinMergeU.exe")
         .arg(&before_temp_dir)
         .arg(&after_dir)
         .spawn() {
-        log::error!("Failed to spawn WinMergeU: {}", e);
+        Ok(_) => {
+            log::info!("Launched WinMergeU successfully.");
+        },
+        Err(e) => {
+            log::warn!("Failed to spawn WinMergeU: {}. Trying Windiff...", e);
+            match Command::new("Windiff.exe")
+                .arg(&before_temp_dir)
+                .arg(&after_dir)
+                .spawn() {
+                Ok(_) => {
+                    log::info!("Launched Windiff successfully.");
+                },
+                Err(e2) => {
+                    log::error!("Failed to spawn Windiff: {}", e2);
+                }
+            }
+        }
     }
     Ok(())
 }
