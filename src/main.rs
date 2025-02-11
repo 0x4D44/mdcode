@@ -1,3 +1,18 @@
+/*
+This file implements "mdcode", a simple code management tool built on top of Git.
+It provides a command-line interface with subcommands for creating new repositories,
+updating repositories (staging changes and committing), displaying repository information,
+and diffing repository versions.
+ 
+Key features and structure:
+- Uses Clap for parsing command-line arguments and subcommands.
+- Leverages git2 for Git repository operations (initial commit, diffing, etc.).
+- Scans directories for source files using WalkDir while filtering out build artifact directories 
+  ("target", "bin", "obj") that are commonly generated in C# (and other) build trees.
+- Provides utility functions for generating a .gitignore file, detecting file types, and checking out Git trees.
+- Uses colored logging to provide clear output to the user.
+*/
+
 use clap::{Parser, Subcommand};
 use git2::{Delta, Repository, Signature, ErrorCode, ObjectType, Sort};
 use chrono::{Utc, TimeZone, LocalResult};
@@ -146,9 +161,11 @@ fn main() {
     }
 }
 
-/// Returns true if any component of the entry's path is named "target".
-fn is_in_target(entry: &walkdir::DirEntry) -> bool {
-    entry.path().components().any(|comp| comp.as_os_str() == "target")
+/// Returns true if any component of the entry's path is named "target", "bin", or "obj".
+fn is_in_excluded_dir(entry: &walkdir::DirEntry) -> bool {
+    entry.path().components().any(|comp| {
+        comp.as_os_str() == "target" || comp.as_os_str() == "bin" || comp.as_os_str() == "obj"
+    })
 }
 
 /// Create a new repository and make an initial commit.
@@ -291,12 +308,12 @@ fn update_repository(dir: &str, dry_run: bool, commit_msg: Option<&str>) -> Resu
     Ok(())
 }
 
-/// Scan the entire directory tree and count total files, skipping any entries under "target".
+/// Scan the entire directory tree and count total files, skipping any entries under excluded directories.
 fn scan_total_files(dir: &str) -> Result<usize, Box<dyn Error>> {
     log::debug!("Scanning source tree in '{}'...", dir);
     let mut total = 0;
     for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
-        if is_in_target(&entry) {
+        if is_in_excluded_dir(&entry) {
             continue;
         }
         if entry.file_type().is_file() {
@@ -307,13 +324,13 @@ fn scan_total_files(dir: &str) -> Result<usize, Box<dyn Error>> {
     Ok(total)
 }
 
-/// Scan for source files (ignoring files under target directories).
+/// Scan for source files (ignoring files under excluded directories).
 fn scan_source_files(dir: &str) -> Result<(Vec<PathBuf>, usize), Box<dyn Error>> {
     log::debug!("Scanning for source files in '{}'...", dir);
     let mut source_files = Vec::new();
     let mut count = 0;
     for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
-        if is_in_target(&entry) {
+        if is_in_excluded_dir(&entry) {
             continue;
         }
         if entry.file_type().is_file() {
@@ -449,7 +466,6 @@ fn detect_file_type(file_path: &Path) -> Option<&'static str> {
 
 /// Display repository info. Commits are displayed in ascending order (oldest first)
 /// but the index is calculated so that the newest commit is 0 and older ones have higher numbers.
-/// For example, if there are N commits then the oldest is displayed with index [N-1] and the newest with [000].
 fn info_repository(dir: &str) -> Result<(), Box<dyn Error>> {
     let repo = match Repository::open(dir) {
         Ok(r) => r,
@@ -555,7 +571,7 @@ fn create_gitignore(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
 /// Generate the content for the .gitignore file.
 fn generate_gitignore_content(_dir: &str) -> Result<String, Box<dyn Error>> {
     log::debug!("Generating .gitignore content...");
-    let ignore_patterns = vec!["target/", "*.tmp", "*.log"];
+    let ignore_patterns = vec!["target/", "bin/", "obj/", "*.tmp", "*.log"];
     Ok(ignore_patterns.join("\n"))
 }
 
@@ -626,7 +642,7 @@ mod tests {
     #[test]
     fn test_generate_gitignore_content() {
         let content = generate_gitignore_content(".").unwrap();
-        let expected = "target/\n*.tmp\n*.log";
+        let expected = "target/\nbin/\nobj/\n*.tmp\n*.log";
         assert_eq!(content, expected);
     }
 
