@@ -1,16 +1,17 @@
 /*
 This file implements "mdcode", a simple code management tool built on top of Git.
-It provides a command-line interface with subcommands for creating new repositories,
+It provides a command-line interface with commands for creating new repositories,
 updating repositories (staging changes and committing), displaying repository information,
-and diffing repository versions.
- 
+diffing repository versions, and integrating with GitHub (creating a repo and pushing changes).
+
 Key features and structure:
-- Uses Clap for parsing command-line arguments and subcommands.
+- Uses Clap for parsing command-line arguments.
 - Leverages git2 for Git repository operations (initial commit, diffing, etc.).
 - Scans directories for source files using WalkDir while filtering out build artifact directories 
   ("target", "bin", "obj") that are commonly generated in C# (and other) build trees.
 - Provides utility functions for generating a .gitignore file, detecting file types, and checking out Git trees.
 - Uses colored logging to provide clear output to the user.
+- Integrates with GitHub using octocrab for API calls.
 */
 
 use clap::{Parser, Subcommand};
@@ -24,18 +25,20 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
+use octocrab;
+use tokio::runtime::Runtime;
 
 // Define our uniform color constants.
 const BLUE: &str = "\x1b[94m";    // Light blue
-const GREEN: &str = "\x1b[32m";   // Green
-const RED: &str = "\x1b[31m";     // Red
-const YELLOW: &str = "\x1b[93m";  // Light yellow
+const GREEN: &str = "\x1b[32m";     // Green
+const RED: &str = "\x1b[31m";       // Red
+const YELLOW: &str = "\x1b[93m";    // Light yellow
 const RESET: &str = "\x1b[0m";
 
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.1.0",
+    version = "1.2.0",
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -61,7 +64,7 @@ OPTIONS:
 "
 )]
 struct Cli {
-    /// Subcommand to run: new, update, info, or diff (short aliases shown)
+    /// Command to run: new, update, info, diff, github_create, or github_push (short aliases shown)
     #[command(subcommand)]
     command: Commands,
 
@@ -115,6 +118,30 @@ Modes:
         #[arg(num_args = 0..=2)]
         versions: Vec<i32>,
     },
+    #[command(
+        name = "github_create",
+        visible_alias = "g",
+        about = "Create a GitHub repository from the local repository, add it as remote, and push current state"
+    )]
+    GithubCreate {
+        /// Directory of the local repository (e.g. "." for current directory)
+        directory: String,
+        /// Optional description for the GitHub repository
+        #[arg(short, long)]
+        description: Option<String>,
+    },
+    #[command(
+        name = "github_push",
+        visible_alias = "p",
+        about = "Push changes to the GitHub remote"
+    )]
+    GithubPush {
+        /// Directory of the local repository
+        directory: String,
+        /// Name of the remote to push to (default: origin)
+        #[arg(short, long, default_value = "origin")]
+        remote: String,
+    },
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
@@ -138,6 +165,37 @@ fn run() -> Result<(), Box<dyn Error>> {
             log::info!("Diffing repository '{}' with versions {:?}", directory, versions);
             diff_command(directory, versions, cli.dry_run)?;
         }
+        Commands::GithubCreate { directory, description } => {
+            log::info!("Creating GitHub repository from local directory '{}'", directory);
+            // Deduce repository name from the provided directory.
+            let repo_name = {
+                let path = Path::new(directory);
+                // If directory is ".", use current dir.
+                let actual = if path == Path::new(".") {
+                    env::current_dir()?
+                } else {
+                    path.to_path_buf()
+                };
+                actual.file_name()
+                    .ok_or("Could not determine repository name from directory")?
+                    .to_string_lossy()
+                    .to_string()
+            };
+
+            let rt = Runtime::new()?;
+            let created_repo = rt.block_on(github_create(&repo_name, description.clone()))?;
+            // Use the clone URL from the created repository.
+            let remote_url = created_repo.clone_url
+                .ok_or("GitHub repository did not return a clone URL")?;
+            // Convert the Url to a string slice.
+            add_remote(directory, "origin", remote_url.as_str())?;
+            // Automatically push the current branch.
+            github_push(directory, "origin")?;
+        },
+        Commands::GithubPush { directory, remote } => {
+            log::info!("Pushing local repository '{}' to remote '{}'", directory, remote);
+            github_push(directory, remote)?;
+        },
     }
     Ok(())
 }
@@ -156,7 +214,8 @@ fn main() {
         .filter(None, log::LevelFilter::Info)
         .init();
 
-    if let Err(_) = run() {
+    if let Err(e) = run() {
+        eprintln!("{}Error:{} {}", BLUE, RESET, e);
         std::process::exit(1);
     }
 }
@@ -466,16 +525,7 @@ fn launch_diff_tool(before: &Path, after: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// Detect file type based on file extension.
-///
 /// Returns a string representing the file’s category if recognized.
-/// This function now supports a wide range of file types:
-///
-/// - **Source Code**: C, C++, Java, Python, Ruby, C#, Go, PHP, Rust, Swift, Kotlin, Scala, JavaScript, TypeScript,
-///   Shell, Batch, and PowerShell.
-/// - **Markup/Documentation**: HTML, CSS (and preprocessors), XML, JSON, YAML, TOML, Markdown, reStructuredText, AsciiDoc.
-/// - **Configuration/Build**: INI, CFG, CONF, solution and project files.
-/// - **Database**: SQL.
-/// - **Images/Assets**: JPG/JPEG, PNG, BMP, GIF, TIFF, WebP, SVG, ICO, CUR, and dialog files.
 fn detect_file_type(file_path: &Path) -> Option<&'static str> {
     let extension = file_path.extension()?.to_str()?.to_lowercase();
     match extension.as_str() {
@@ -670,6 +720,61 @@ fn create_temp_dir(prefix: &str) -> Result<PathBuf, Box<dyn Error>> {
     base.push(format!("{}.{}", prefix, unique));
     fs::create_dir_all(&base)?;
     Ok(base)
+}
+
+/// Create a GitHub repository using the GitHub API.
+/// 
+/// Requires the environment variable GITHUB_TOKEN to be set.
+/// Returns the created repository.
+async fn github_create(name: &str, description: Option<String>) -> Result<octocrab::models::Repository, Box<dyn std::error::Error>> {
+    let token = std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN not set");
+    let octocrab = octocrab::Octocrab::builder()
+        .personal_token(token)
+        .build()?;
+
+    // POST to /user/repos with a JSON payload containing "name" and "description"
+    let repo: octocrab::models::Repository = octocrab
+        .post("/user/repos", Some(&serde_json::json!({
+            "name": name,
+            "description": description.unwrap_or_default()
+        })))
+        .await?;
+    println!("Created GitHub repository: {}", repo.html_url);
+    Ok(repo)
+}
+
+/// Add a remote to the local repository.
+fn add_remote(directory: &str, remote_name: &str, remote_url: &str) -> Result<(), Box<dyn Error>> {
+    let repo = Repository::open(directory)?;
+    // If the remote already exists, skip adding.
+    if repo.find_remote(remote_name).is_err() {
+        repo.remote(remote_name, remote_url)?;
+        log::info!("Added remote '{}' with URL '{}'", remote_name, remote_url);
+    } else {
+        log::info!("Remote '{}' already exists", remote_name);
+    }
+    Ok(())
+}
+
+/// Push local changes to the GitHub remote using the system's Git CLI.
+/// This function determines the current branch name from the repository HEAD.
+fn github_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = Repository::open(directory)?;
+    let head = repo.head()?;
+    let branch = head.shorthand().unwrap_or("master");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .arg("push")
+        .arg(remote)
+        .arg(branch)
+        .status()?;
+    if status.success() {
+        println!("Successfully pushed changes to GitHub.");
+        Ok(())
+    } else {
+        Err("Failed to push changes.".into())
+    }
 }
 
 #[cfg(test)]
