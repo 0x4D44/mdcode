@@ -773,14 +773,40 @@ fn github_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::
     let repo = Repository::open(directory)?;
     let head = repo.head()?;
     let branch = head.shorthand().unwrap_or("master");
-    let status = Command::new("git")
+
+    // Auto pull changes from the remote branch before pushing.
+    println!("Auto-pulling changes from remote '{}' for branch '{}'", remote, branch);
+    let pull_status = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .arg("pull")
+        .arg(remote)
+        .arg(branch)
+        // Optionally add --no-edit to bypass commit message prompts if auto-merging.
+        .arg("--no-edit")
+        .status()?;
+
+    if !pull_status.success() {
+        eprintln!("Auto-pull failed. This may be due to merge conflicts.");
+        println!("Please follow these steps to resolve merge conflicts:");
+        println!("1. Run 'git status' in the repository to see the files with conflicts.");
+        println!("2. Open the conflicted files and resolve the conflicts manually.");
+        println!("3. After resolving, add the files using 'git add <file>' for each conflicted file.");
+        println!("4. Commit the merge with 'git commit' (if needed).");
+        println!("5. Finally, re-run 'mdcode p .' to push your changes.");
+        return Err("Merge failed. Please resolve conflicts and try again.".into());
+    }
+
+    // Attempt to push after a successful pull.
+    println!("Pushing local repository '{}' to remote '{}'", directory, remote);
+    let push_status = Command::new("git")
         .arg("-C")
         .arg(directory)
         .arg("push")
         .arg(remote)
         .arg(branch)
         .status()?;
-    if status.success() {
+    if push_status.success() {
         println!("Successfully pushed changes to GitHub.");
         Ok(())
     } else {
