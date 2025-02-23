@@ -35,7 +35,7 @@ const RESET: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.0.0",
+    version = "1.1.0",
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -169,8 +169,6 @@ fn is_in_excluded_dir(entry: &walkdir::DirEntry) -> bool {
 }
 
 /// Create a new repository and make an initial commit.
-/// If a valid git repository (with a HEAD) already exists in the directory, return an error.
-/// Otherwise, proceed even if the directory was created by Cargo.
 fn new_repository(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
     if !check_git_installed() {
         log::error!("Git is not installed. Please install Git from https://git-scm.com/downloads");
@@ -389,7 +387,6 @@ fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit, Box<
 }
 
 /// Diff commits based on provided version numbers.
-/// If an invalid index is specified, logs an error (with "Error:" in light blue) and returns an error.
 fn diff_command(dir: &str, versions: &Vec<i32>, dry_run: bool) -> Result<(), Box<dyn Error>> {
     let repo = Repository::open(dir)?;
     let before_commit = match if versions.is_empty() { get_commit_by_index(&repo, 0) } else { get_commit_by_index(&repo, versions[0]) } {
@@ -437,46 +434,98 @@ fn diff_command(dir: &str, versions: &Vec<i32>, dry_run: bool) -> Result<(), Box
 
     log::info!("{}Comparing {} with {}{}", YELLOW, before_timestamp, after_timestamp_str, RESET);
 
-    // Attempt to launch WinMergeU; if it fails, try Windiff.
-    match Command::new("WinMergeU.exe")
-        .arg(&before_temp_dir)
-        .arg(&after_dir)
-        .spawn() {
-        Ok(_) => {
-            log::info!("Launched WinMergeU successfully.");
-        },
-        Err(e) => {
-            log::warn!("Failed to spawn WinMergeU: {}. Trying Windiff...", e);
-            match Command::new("Windiff.exe")
-                .arg(&before_temp_dir)
-                .arg(&after_dir)
-                .spawn() {
-                Ok(_) => {
-                    log::info!("Launched Windiff successfully.");
-                },
-                Err(e2) => {
-                    log::error!("Failed to spawn Windiff: {}", e2);
-                }
-            }
+    // Launch the diff tool only if not a dry run.
+    if !dry_run {
+        if let Err(e) = launch_diff_tool(&before_temp_dir, &after_dir) {
+            log::error!("Failed to launch diff tool: {}", e);
         }
     }
     Ok(())
 }
 
+/// Launch a diff tool: try WinMergeU.exe first, then fall back to windiff.exe.
+fn launch_diff_tool(before: &Path, after: &Path) -> Result<(), Box<dyn Error>> {
+    match Command::new("WinMergeU.exe").arg(before).arg(after).spawn() {
+        Ok(_) => {
+            log::info!("Launched WinMergeU.exe.");
+            Ok(())
+        },
+        Err(e) => {
+            log::warn!("WinMergeU.exe failed to launch: {}. Trying windiff.exe...", e);
+            match Command::new("windiff.exe").arg(before).arg(after).spawn() {
+                Ok(_) => {
+                    log::info!("Launched windiff.exe.");
+                    Ok(())
+                },
+                Err(e2) => {
+                    Err(format!("Failed to launch both diff tools. Windiff error: {}", e2).into())
+                }
+            }
+        }
+    }
+}
+
 /// Detect file type based on file extension.
-/// Now includes ".toml" files (returned as "TOML").
+///
+/// Returns a string representing the file’s category if recognized.
+/// This function now supports a wide range of file types:
+///
+/// - **Source Code**: C, C++, Java, Python, Ruby, C#, Go, PHP, Rust, Swift, Kotlin, Scala, JavaScript, TypeScript,
+///   Shell, Batch, and PowerShell.
+/// - **Markup/Documentation**: HTML, CSS (and preprocessors), XML, JSON, YAML, TOML, Markdown, reStructuredText, AsciiDoc.
+/// - **Configuration/Build**: INI, CFG, CONF, solution and project files.
+/// - **Database**: SQL.
+/// - **Images/Assets**: JPG/JPEG, PNG, BMP, GIF, TIFF, WebP, SVG, ICO, CUR, and dialog files.
 fn detect_file_type(file_path: &Path) -> Option<&'static str> {
     let extension = file_path.extension()?.to_str()?.to_lowercase();
     match extension.as_str() {
-        "c" | "h" | "cpp" | "hpp" | "cc" => Some("C/C++"),
-        "pas" | "pp" => Some("Pascal"),
-        "rb" => Some("Ruby"),
-        "sh" | "csh" => Some("Shell Script"),
-        "cs" => Some("C#"),
-        "rs" => Some("Rust"),
-        "py" => Some("Python"),
+        // Source Code
+        "c"  => Some("C"),
+        "cpp" | "cc" | "cxx" => Some("C++"),
+        "h"  => Some("C/C++ Header"),
+        "hpp" | "hh" | "hxx" => Some("C++ Header"),
+        "java" => Some("Java"),
+        "py"   => Some("Python"),
+        "rb"   => Some("Ruby"),
+        "cs"   => Some("C#"),
+        "go"   => Some("Go"),
+        "php"  => Some("PHP"),
+        "rs"   => Some("Rust"),
+        "swift" => Some("Swift"),
+        "kt" | "kts" => Some("Kotlin"),
+        "scala" => Some("Scala"),
+        "js"  | "jsx" => Some("JavaScript"),
+        "ts"  | "tsx" => Some("TypeScript"),
+        "sh"  | "bash" | "zsh" => Some("Shell Script"),
+        "bat"  => Some("Batch Script"),
+        "ps1"  => Some("PowerShell"),
+        // Markup / Documentation
+        "html" | "htm" => Some("HTML"),
+        "css" | "scss" | "sass" | "less" => Some("CSS"),
+        "xml"  => Some("XML"),
+        "json" => Some("JSON"),
+        "yml"  | "yaml" => Some("YAML"),
         "toml" => Some("TOML"),
-        "md" | "txt" | "rst" => Some("Documentation"),
+        "md"   | "txt" | "rst" | "adoc" => Some("Documentation"),
+        // Configuration / Build
+        "ini" | "cfg" | "conf" => Some("Configuration"),
+        "sln" => Some("Solution File"),
+        "csproj" => Some("C# Project File"),
+        "pom" => Some("Maven Project File"),
+        "gradle" => Some("Gradle Build File"),
+        // Database
+        "sql" => Some("SQL"),
+        // Images & Assets
+        "jpg" | "jpeg" => Some("Image"),
+        "png" => Some("Image"),
+        "bmp" => Some("Image"),
+        "gif" => Some("Image"),
+        "tiff" => Some("Image"),
+        "webp" => Some("Image"),
+        "svg" => Some("Vector Image"),
+        "ico" => Some("Icon"),
+        "cur" => Some("Cursor"),
+        "dlg" => Some("Dialog File"),
         _ => None,
     }
 }
@@ -631,29 +680,83 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_detect_file_type() {
-        let path = Path::new("test.c");
-        assert_eq!(detect_file_type(path), Some("C/C++"));
-        let path = Path::new("test.cpp");
-        assert_eq!(detect_file_type(path), Some("C/C++"));
-        let path = Path::new("test.pas");
-        assert_eq!(detect_file_type(path), Some("Pascal"));
-        let path = Path::new("test.rb");
-        assert_eq!(detect_file_type(path), Some("Ruby"));
-        let path = Path::new("script.sh");
-        assert_eq!(detect_file_type(path), Some("Shell Script"));
-        let path = Path::new("program.cs");
-        assert_eq!(detect_file_type(path), Some("C#"));
-        let path = Path::new("lib.rs");
-        assert_eq!(detect_file_type(path), Some("Rust"));
-        let path = Path::new("app.py");
-        assert_eq!(detect_file_type(path), Some("Python"));
-        let path = Path::new("Cargo.toml");
-        assert_eq!(detect_file_type(path), Some("TOML"));
-        let path = Path::new("README.md");
-        assert_eq!(detect_file_type(path), Some("Documentation"));
-        let path = Path::new("unknown.xyz");
-        assert_eq!(detect_file_type(path), None);
+    fn test_detect_file_type_source_code() {
+        // C / C++
+        assert_eq!(detect_file_type(Path::new("test.c")), Some("C"));
+        assert_eq!(detect_file_type(Path::new("test.cpp")), Some("C++"));
+        assert_eq!(detect_file_type(Path::new("test.cc")), Some("C++"));
+        assert_eq!(detect_file_type(Path::new("test.cxx")), Some("C++"));
+        assert_eq!(detect_file_type(Path::new("test.h")), Some("C/C++ Header"));
+        assert_eq!(detect_file_type(Path::new("test.hpp")), Some("C++ Header"));
+
+        // Other languages
+        assert_eq!(detect_file_type(Path::new("test.java")), Some("Java"));
+        assert_eq!(detect_file_type(Path::new("test.py")), Some("Python"));
+        assert_eq!(detect_file_type(Path::new("test.rb")), Some("Ruby"));
+        assert_eq!(detect_file_type(Path::new("test.cs")), Some("C#"));
+        assert_eq!(detect_file_type(Path::new("test.go")), Some("Go"));
+        assert_eq!(detect_file_type(Path::new("test.php")), Some("PHP"));
+        assert_eq!(detect_file_type(Path::new("test.rs")), Some("Rust"));
+        assert_eq!(detect_file_type(Path::new("test.swift")), Some("Swift"));
+        assert_eq!(detect_file_type(Path::new("test.kt")), Some("Kotlin"));
+        assert_eq!(detect_file_type(Path::new("test.kts")), Some("Kotlin"));
+        assert_eq!(detect_file_type(Path::new("test.scala")), Some("Scala"));
+        assert_eq!(detect_file_type(Path::new("test.js")), Some("JavaScript"));
+        assert_eq!(detect_file_type(Path::new("test.jsx")), Some("JavaScript"));
+        assert_eq!(detect_file_type(Path::new("test.ts")), Some("TypeScript"));
+        assert_eq!(detect_file_type(Path::new("test.tsx")), Some("TypeScript"));
+        assert_eq!(detect_file_type(Path::new("test.sh")), Some("Shell Script"));
+        assert_eq!(detect_file_type(Path::new("test.bash")), Some("Shell Script"));
+        assert_eq!(detect_file_type(Path::new("test.zsh")), Some("Shell Script"));
+        assert_eq!(detect_file_type(Path::new("test.bat")), Some("Batch Script"));
+        assert_eq!(detect_file_type(Path::new("test.ps1")), Some("PowerShell"));
+    }
+
+    #[test]
+    fn test_detect_file_type_markup_and_config() {
+        // Markup and documentation
+        assert_eq!(detect_file_type(Path::new("index.html")), Some("HTML"));
+        assert_eq!(detect_file_type(Path::new("style.css")), Some("CSS"));
+        assert_eq!(detect_file_type(Path::new("script.scss")), Some("CSS"));
+        assert_eq!(detect_file_type(Path::new("doc.xml")), Some("XML"));
+        assert_eq!(detect_file_type(Path::new("data.json")), Some("JSON"));
+        assert_eq!(detect_file_type(Path::new("config.yml")), Some("YAML"));
+        assert_eq!(detect_file_type(Path::new("config.yaml")), Some("YAML"));
+        assert_eq!(detect_file_type(Path::new("Cargo.toml")), Some("TOML"));
+        assert_eq!(detect_file_type(Path::new("README.md")), Some("Documentation"));
+        assert_eq!(detect_file_type(Path::new("notes.txt")), Some("Documentation"));
+        assert_eq!(detect_file_type(Path::new("manual.rst")), Some("Documentation"));
+        assert_eq!(detect_file_type(Path::new("guide.adoc")), Some("Documentation"));
+
+        // Configuration / Build
+        assert_eq!(detect_file_type(Path::new("settings.ini")), Some("Configuration"));
+        assert_eq!(detect_file_type(Path::new("config.cfg")), Some("Configuration"));
+        assert_eq!(detect_file_type(Path::new("app.conf")), Some("Configuration"));
+        assert_eq!(detect_file_type(Path::new("project.sln")), Some("Solution File"));
+        assert_eq!(detect_file_type(Path::new("app.csproj")), Some("C# Project File"));
+        assert_eq!(detect_file_type(Path::new("pom.xml")), Some("XML")); // Note: Maven's pom.xml is XML
+        assert_eq!(detect_file_type(Path::new("build.gradle")), Some("Gradle Build File"));
+
+        // Database
+        assert_eq!(detect_file_type(Path::new("schema.sql")), Some("SQL"));
+    }
+
+    #[test]
+    fn test_detect_file_type_images_and_assets() {
+        // Raster images
+        assert_eq!(detect_file_type(Path::new("image.jpg")), Some("Image"));
+        assert_eq!(detect_file_type(Path::new("image.jpeg")), Some("Image"));
+        assert_eq!(detect_file_type(Path::new("image.png")), Some("Image"));
+        assert_eq!(detect_file_type(Path::new("image.bmp")), Some("Image"));
+        assert_eq!(detect_file_type(Path::new("image.gif")), Some("Image"));
+        assert_eq!(detect_file_type(Path::new("image.tiff")), Some("Image"));
+        assert_eq!(detect_file_type(Path::new("image.webp")), Some("Image"));
+        // Vector and icons
+        assert_eq!(detect_file_type(Path::new("vector.svg")), Some("Vector Image"));
+        assert_eq!(detect_file_type(Path::new("icon.ico")), Some("Icon"));
+        assert_eq!(detect_file_type(Path::new("cursor.cur")), Some("Cursor"));
+        // Other asset
+        assert_eq!(detect_file_type(Path::new("dialog.dlg")), Some("Dialog File"));
     }
 
     #[test]
