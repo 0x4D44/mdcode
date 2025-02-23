@@ -530,6 +530,13 @@ fn launch_diff_tool(before: &Path, after: &Path) -> Result<(), Box<dyn Error>> {
 /// Detect file type based on file extension.
 /// Returns a string representing the file’s category if recognized.
 fn detect_file_type(file_path: &Path) -> Option<&'static str> {
+    // Allow a file named "LICENSE" (case-insensitive) as a recognized type.
+    if let Some(file_name) = file_path.file_name()?.to_str() {
+        if file_name.eq_ignore_ascii_case("LICENSE") {
+            return Some("License");
+        }
+    }
+    
     let extension = file_path.extension()?.to_str()?.to_lowercase();
     match extension.as_str() {
         // Source Code
