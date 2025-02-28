@@ -38,7 +38,7 @@ const RESET: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.1.0",
+    version = "1.2.0",  // Updated version number
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -124,7 +124,7 @@ Modes:
         about = "Create a GitHub repository from the local repository, add it as remote, and push current state"
     )]
     GithubCreate {
-        /// Directory of the local repository (e.g. "." for current directory)
+        /// Directory of the local repository (e.g. '.' for current directory)
         directory: String,
         /// Optional description for the GitHub repository
         #[arg(short, long)]
@@ -745,7 +745,7 @@ async fn github_create(name: &str, description: Option<String>) -> Result<octocr
 
     // POST to /user/repos with a JSON payload containing "name" and "description"
     let repo: octocrab::models::Repository = octocrab
-        .post("/user/repos", Some(&serde_json::json!({
+        .post("/user/repos", Some(&serde_json::json!( {
             "name": name,
             "description": description.unwrap_or_default()
         })))
@@ -767,6 +767,23 @@ fn add_remote(directory: &str, remote_name: &str, remote_url: &str) -> Result<()
     Ok(())
 }
 
+/// Check if the remote branch exists.
+fn remote_branch_exists(directory: &str, remote: &str, branch: &str) -> Result<bool, Box<dyn Error>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .arg("ls-remote")
+        .arg("--heads")
+        .arg(remote)
+        .arg(branch)
+        .output()?;
+    if output.status.success() {
+        Ok(!output.stdout.is_empty())
+    } else {
+        Ok(false)
+    }
+}
+
 /// Push local changes to the GitHub remote using the system's Git CLI.
 /// This function determines the current branch name from the repository HEAD.
 fn github_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -774,38 +791,54 @@ fn github_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::
     let head = repo.head()?;
     let branch = head.shorthand().unwrap_or("master");
 
-    // Auto pull changes from the remote branch before pushing.
-    println!("Auto-pulling changes from remote '{}' for branch '{}'", remote, branch);
-    let pull_status = Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .arg("pull")
-        .arg(remote)
-        .arg(branch)
-        // Optionally add --no-edit to bypass commit message prompts if auto-merging.
-        .arg("--no-edit")
-        .status()?;
+    // Check if the remote branch exists.
+    let branch_exists = remote_branch_exists(directory, remote, branch)?;
 
-    if !pull_status.success() {
-        eprintln!("Auto-pull failed. This may be due to merge conflicts.");
-        println!("Please follow these steps to resolve merge conflicts:");
-        println!("1. Run 'git status' in the repository to see the files with conflicts.");
-        println!("2. Open the conflicted files and resolve the conflicts manually.");
-        println!("3. After resolving, add the files using 'git add <file>' for each conflicted file.");
-        println!("4. Commit the merge with 'git commit' (if needed).");
-        println!("5. Finally, re-run 'mdcode p .' to push your changes.");
-        return Err("Merge failed. Please resolve conflicts and try again.".into());
+    if branch_exists {
+        println!("Auto-pulling changes from remote '{}' for branch '{}'", remote, branch);
+        let pull_status = Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .arg("pull")
+            .arg(remote)
+            .arg(branch)
+            .arg("--no-edit")
+            .status()?;
+        if !pull_status.success() {
+            eprintln!("Auto-pull failed. This may be due to merge conflicts.");
+            println!("Please follow these steps to resolve merge conflicts:");
+            println!("1. Run 'git status' in the repository to see the files with conflicts.");
+            println!("2. Open the conflicted files and resolve the conflicts manually.");
+            println!("3. After resolving, add the files using 'git add <file>' for each conflicted file.");
+            println!("4. Commit the merge with 'git commit' (if needed).");
+            println!("5. Finally, re-run 'mdcode p .' to push your changes.");
+            return Err("Merge failed. Please resolve conflicts and try again.".into());
+        }
+    } else {
+        println!("Remote branch '{}' does not exist. Skipping pull.", branch);
     }
 
-    // Attempt to push after a successful pull.
     println!("Pushing local repository '{}' to remote '{}'", directory, remote);
-    let push_status = Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .arg("push")
-        .arg(remote)
-        .arg(branch)
-        .status()?;
+    let push_status = if branch_exists {
+        Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .arg("push")
+            .arg(remote)
+            .arg(branch)
+            .status()?
+    } else {
+        // If branch doesn't exist, push and set upstream.
+        Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .arg("push")
+            .arg("-u")
+            .arg(remote)
+            .arg(branch)
+            .status()?
+    };
+
     if push_status.success() {
         println!("Successfully pushed changes to GitHub.");
         Ok(())
