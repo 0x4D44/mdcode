@@ -8,7 +8,7 @@ Key features and structure:
 - Uses Clap for parsing command-line arguments.
 - Leverages git2 for Git repository operations (initial commit, diffing, etc.).
 - Scans directories for source files using WalkDir while filtering out build artifact directories 
-  ("target", "bin", "obj", "venv") that are commonly generated in various build and virtual environment setups.
+  ("target", "bin", "obj", "venv", ".venv", "env") that are commonly generated in various build and virtual environment setups.
 - Provides utility functions for generating a .gitignore file, detecting file types, and checking out Git trees.
 - Uses colored logging to provide clear output to the user.
 - Integrates with GitHub using octocrab for API calls.
@@ -220,13 +220,18 @@ fn main() {
     }
 }
 
-/// Returns true if any component of the entry's path is named "target", "bin", "obj", or "venv".
+/// Returns true if any component of the entry's path is an excluded directory.
+///
+/// The tool ignores common build and virtual environment folders: `target`,
+/// `bin`, `obj`, `venv`, `.venv`, and `env`.
 fn is_in_excluded_dir(entry: &walkdir::DirEntry) -> bool {
     entry.path().components().any(|comp| {
         comp.as_os_str() == "target" ||
         comp.as_os_str() == "bin" ||
         comp.as_os_str() == "obj" ||
-        comp.as_os_str() == "venv"
+        comp.as_os_str() == "venv" ||
+        comp.as_os_str() == ".venv" ||
+        comp.as_os_str() == "env"
     })
 }
 
@@ -702,8 +707,17 @@ fn create_gitignore(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
 /// Generate the content for the .gitignore file.
 fn generate_gitignore_content(_dir: &str) -> Result<String, Box<dyn Error>> {
     log::debug!("Generating .gitignore content...");
-    // Added "venv/" to ignore virtual environments.
-    let ignore_patterns = vec!["target/", "bin/", "obj/", "venv/", "*.tmp", "*.log"];
+    // Ignore common build and virtual environment directories
+    let ignore_patterns = vec![
+        "target/",
+        "bin/",
+        "obj/",
+        "venv/",
+        ".venv/",
+        "env/",
+        "*.tmp",
+        "*.log",
+    ];
     Ok(ignore_patterns.join("\n"))
 }
 
@@ -942,7 +956,7 @@ mod tests {
     #[test]
     fn test_generate_gitignore_content() {
         let content = generate_gitignore_content(".").unwrap();
-        let expected = "target/\nbin/\nobj/\nvenv/\n*.tmp\n*.log";
+        let expected = "target/\nbin/\nobj/\nvenv/\n.venv/\nenv/\n*.tmp\n*.log";
         assert_eq!(content, expected);
     }
 
