@@ -64,7 +64,7 @@ OPTIONS:
 "
 )]
 struct Cli {
-    /// Command to run: new, update, info, diff, github_create, or github_push (short aliases shown)
+    /// Command to run: new, update, info, diff, gh_create, or gh_push (short aliases shown)
     #[command(subcommand)]
     command: Commands,
 
@@ -119,11 +119,11 @@ Modes:
         versions: Vec<i32>,
     },
     #[command(
-        name = "github_create",
+        name = "gh_create",
         visible_alias = "g",
         about = "Create a GitHub repository from the local repository, add it as remote, and push current state"
     )]
-    GithubCreate {
+    GhCreate {
         /// Directory of the local repository (e.g. '.' for current directory)
         directory: String,
         /// Optional description for the GitHub repository
@@ -131,11 +131,11 @@ Modes:
         description: Option<String>,
     },
     #[command(
-        name = "github_push",
+        name = "gh_push",
         visible_alias = "p",
         about = "Push changes to the GitHub remote"
     )]
-    GithubPush {
+    GhPush {
         /// Directory of the local repository
         directory: String,
         /// Name of the remote to push to (default: origin)
@@ -165,7 +165,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             log::info!("Diffing repository '{}' with versions {:?}", directory, versions);
             diff_command(directory, versions, cli.dry_run)?;
         }
-        Commands::GithubCreate { directory, description } => {
+        Commands::GhCreate { directory, description } => {
             log::info!("Creating GitHub repository from local directory '{}'", directory);
             // Deduce repository name from the provided directory.
             let repo_name = {
@@ -183,18 +183,18 @@ fn run() -> Result<(), Box<dyn Error>> {
             };
 
             let rt = Runtime::new()?;
-            let created_repo = rt.block_on(github_create(&repo_name, description.clone()))?;
+            let created_repo = rt.block_on(gh_create(&repo_name, description.clone()))?;
             // Use the clone URL from the created repository.
             let remote_url = created_repo.clone_url
                 .ok_or("GitHub repository did not return a clone URL")?;
             // Add the remote "origin" to the local repository.
             add_remote(directory, "origin", remote_url.as_str())?;
             // Automatically push the current branch.
-            github_push(directory, "origin")?;
+            gh_push(directory, "origin")?;
         },
-        Commands::GithubPush { directory, remote } => {
+        Commands::GhPush { directory, remote } => {
             log::info!("Pushing local repository '{}' to remote '{}'", directory, remote);
-            github_push(directory, remote)?;
+            gh_push(directory, remote)?;
         },
     }
     Ok(())
@@ -756,7 +756,7 @@ fn create_temp_dir(prefix: &str) -> Result<PathBuf, Box<dyn Error>> {
 /// 
 /// Requires the environment variable GITHUB_TOKEN to be set.
 /// Returns the created repository.
-async fn github_create(name: &str, description: Option<String>) -> Result<octocrab::models::Repository, Box<dyn std::error::Error>> {
+async fn gh_create(name: &str, description: Option<String>) -> Result<octocrab::models::Repository, Box<dyn std::error::Error>> {
     let token = std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN not set");
     let octocrab = octocrab::Octocrab::builder()
         .personal_token(token)
@@ -805,7 +805,7 @@ fn remote_branch_exists(directory: &str, remote: &str, branch: &str) -> Result<b
 
 /// Push local changes to the GitHub remote using the system's Git CLI.
 /// This function determines the current branch name from the repository HEAD.
-fn github_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn gh_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::open(directory)?;
     let head = repo.head()?;
     let branch = head.shorthand().unwrap_or("master");
