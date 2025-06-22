@@ -255,22 +255,27 @@ fn new_repository(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
             fs::create_dir_all(dir)?;
         }
     }
-    let repo = Repository::init(dir)?;
-
-    log::info!("Initializing Git repository...");
-    if !dry_run {
-        create_gitignore(dir, dry_run)?;
+    if dry_run {
+        log::info!("Dry run enabled - repository will not be created.");
     }
-    let added_count = add_files_to_git(dir, &source_files, dry_run)?;
 
-    if !dry_run {
+    let added_count = if dry_run {
+        source_files.len()
+    } else {
+        let repo = Repository::init(dir)?;
+
+        log::info!("Initializing Git repository...");
+        create_gitignore(dir, false)?;
+        let count = add_files_to_git(dir, &source_files, false)?;
+
         let mut index = repo.index()?;
         index.write()?;
         let tree_id = index.write_tree()?;
         let tree = repo.find_tree(tree_id)?;
         let signature = Signature::now("mdcode", "mdcode@example.com")?;
         repo.commit(Some("HEAD"), &signature, &signature, "Initial commit", &tree, &[])?;
-    }
+        count
+    };
 
     log::info!("{}New files added:{} {}",
         BLUE,
