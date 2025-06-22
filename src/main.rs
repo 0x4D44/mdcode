@@ -38,7 +38,7 @@ const RESET: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.2.0",  // Updated version number
+    version = "1.3.0",  // Updated version number
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -48,7 +48,9 @@ Diff Modes:
   mdcode diff <directory> <n>
     => Compare current working directory vs commit selected by n (0 is most recent, 1 for next, etc.).
   mdcode diff <directory> <n> <m>
-    => Compare commit selected by n (before) vs commit selected by m (after).",
+    => Compare commit selected by n (before) vs commit selected by m (after).
+  mdcode diff <directory> H <n>
+    => Compare GitHub HEAD (before) vs local commit selected by n (after).",
     help_template = "\
 {bin} {version}
 {about}
@@ -109,14 +111,16 @@ Modes:
   mdcode diff <directory> <n>
     => Compare current working directory vs commit selected by n (0 is most recent, 1 for next, etc.).
   mdcode diff <directory> <n> <m>
-    => Compare commit selected by n (before) vs commit selected by m (after)."
+    => Compare commit selected by n (before) vs commit selected by m (after).
+  mdcode diff <directory> H <n>
+    => Compare GitHub HEAD (before) vs local commit selected by n (after)."
     )]
     Diff {
         /// Directory of the repository to diff
         directory: String,
         /// Optional version numbers (0 is most recent; 1, 2, ... select older commits)
         #[arg(num_args = 0..=2)]
-        versions: Vec<i32>,
+        versions: Vec<String>,
     },
     #[command(
         name = "gh_create",
@@ -458,14 +462,43 @@ fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit, Box<
     }
 }
 
-/// Diff commits based on provided version numbers.
-fn diff_command(dir: &str, versions: &Vec<i32>, dry_run: bool) -> Result<(), Box<dyn Error>> {
+/// Retrieve the commit pointed to by the remote HEAD on GitHub.
+fn get_remote_head_commit(dir: &str) -> Result<git2::Commit, Box<dyn Error>> {
+    // Fetch the latest changes from the remote named "origin".
+    let fetch_status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("fetch")
+        .arg("origin")
+        .status()?;
+    if !fetch_status.success() {
+        return Err("git fetch failed".into());
+    }
+
     let repo = Repository::open(dir)?;
-    let before_commit = match if versions.is_empty() { get_commit_by_index(&repo, 0) } else { get_commit_by_index(&repo, versions[0]) } {
-        Ok(c) => c,
-        Err(_) => {
-            log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
-            return Err("invalid repo indexes specified".into());
+    // origin/HEAD is a symbolic reference to the default branch.
+    let head_ref = repo.find_reference("refs/remotes/origin/HEAD")?;
+    let target = head_ref
+        .symbolic_target()
+        .ok_or("origin/HEAD has no target")?;
+    let branch_ref = repo.find_reference(target)?;
+    let oid = branch_ref.target().ok_or("Remote HEAD has no target")?;
+    repo.find_commit(oid).map_err(|e| e.into())
+}
+
+/// Diff commits based on provided version numbers.
+fn diff_command(dir: &str, versions: &Vec<String>, dry_run: bool) -> Result<(), Box<dyn Error>> {
+    let repo = Repository::open(dir)?;
+    let before_commit = if versions.len() == 2 && versions[0].to_uppercase() == "H" {
+        get_remote_head_commit(dir)?
+    } else {
+        let idx = if versions.is_empty() { 0 } else { versions[0].parse::<i32>().map_err(|_| "invalid repo indexes specified")? };
+        match get_commit_by_index(&repo, idx) {
+            Ok(c) => c,
+            Err(_) => {
+                log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
+                return Err("invalid repo indexes specified".into());
+            }
         }
     };
     let before_tree = before_commit.tree()?;
@@ -481,25 +514,49 @@ fn diff_command(dir: &str, versions: &Vec<i32>, dry_run: bool) -> Result<(), Box
     log::info!("Checked out 'before' snapshot to {:?}", before_temp_dir);
 
     let (after_dir, after_timestamp_str) = if versions.len() == 2 {
-        let after_commit = match get_commit_by_index(&repo, versions[1]) {
-            Ok(c) => c,
-            Err(_) => {
-                log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
-                return Err("invalid repo indexes specified".into());
+        if versions[0].to_uppercase() == "H" {
+            let idx = versions[1].parse::<i32>().map_err(|_| "invalid repo indexes specified")?;
+            let after_commit = match get_commit_by_index(&repo, idx) {
+                Ok(c) => c,
+                Err(_) => {
+                    log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
+                    return Err("invalid repo indexes specified".into());
+                }
+            };
+            let after_tree = after_commit.tree()?;
+            let after_timestamp = match Utc.timestamp_opt(after_commit.time().seconds(), 0) {
+                LocalResult::Single(dt) => dt.naive_utc().format("%Y-%m-%d_%H%M%S").to_string(),
+                _ => return Err("Invalid timestamp".into()),
+            };
+            let after_prefix = format!("after.{}.{}", dir, after_timestamp);
+            let temp = create_temp_dir(&after_prefix)?;
+            if !dry_run {
+                checkout_tree_to_dir(&repo, &after_tree, &temp)?;
             }
-        };
-        let after_tree = after_commit.tree()?;
-        let after_timestamp = match Utc.timestamp_opt(after_commit.time().seconds(), 0) {
-            LocalResult::Single(dt) => dt.naive_utc().format("%Y-%m-%d_%H%M%S").to_string(),
-            _ => return Err("Invalid timestamp".into()),
-        };
-        let after_prefix = format!("after.{}.{}", dir, after_timestamp);
-        let temp = create_temp_dir(&after_prefix)?;
-        if !dry_run {
-            checkout_tree_to_dir(&repo, &after_tree, &temp)?;
+            log::info!("Checked out 'after' snapshot to {:?}", temp);
+            (temp, after_timestamp)
+        } else {
+            let idx = versions[1].parse::<i32>().map_err(|_| "invalid repo indexes specified")?;
+            let after_commit = match get_commit_by_index(&repo, idx) {
+                Ok(c) => c,
+                Err(_) => {
+                    log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
+                    return Err("invalid repo indexes specified".into());
+                }
+            };
+            let after_tree = after_commit.tree()?;
+            let after_timestamp = match Utc.timestamp_opt(after_commit.time().seconds(), 0) {
+                LocalResult::Single(dt) => dt.naive_utc().format("%Y-%m-%d_%H%M%S").to_string(),
+                _ => return Err("Invalid timestamp".into()),
+            };
+            let after_prefix = format!("after.{}.{}", dir, after_timestamp);
+            let temp = create_temp_dir(&after_prefix)?;
+            if !dry_run {
+                checkout_tree_to_dir(&repo, &after_tree, &temp)?;
+            }
+            log::info!("Checked out 'after' snapshot to {:?}", temp);
+            (temp, after_timestamp)
         }
-        log::info!("Checked out 'after' snapshot to {:?}", temp);
-        (temp, after_timestamp)
     } else {
         (PathBuf::from(dir), "current".to_string())
     };
