@@ -19,7 +19,7 @@
 - **Repository Info:** Display the latest commits and file change summaries.
 - **Diffing:** Compare different versions of your code using external diff tools.
 - **GitHub Integration:** Automatically create a GitHub repository, add it as a remote, and push your local branch.
-- **Exclusion of Unwanted Files:** Automatically ignores directories like `target`, `bin`, `obj`, and `venv` so that build artifacts and virtual environments do not clutter your repository.
+- **Exclusion of Unwanted Files:** Automatically ignores directories like `target`, `bin`, `obj`, `venv`, `.venv`, and `env` so that build artifacts and virtual environments do not clutter your repository.
 - **Multi-Language Support:** Recognizes various file types (Rust, Python, C/C++, Java, etc.) to accurately identify source files.
 
 ## Installation
