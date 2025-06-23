@@ -38,7 +38,7 @@ const RESET: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.4.0",  // Updated version number
+    version = "1.5.0",  // Updated version number
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -50,7 +50,9 @@ Diff Modes:
   mdcode diff <directory> <n> <m>
     => Compare commit selected by n (before) vs commit selected by m (after).
   mdcode diff <directory> H <n>
-    => Compare GitHub HEAD (before) vs local commit selected by n (after).",
+    => Compare GitHub HEAD (before) vs local commit selected by n (after).
+  mdcode diff <directory> L
+    => Compare GitHub HEAD (before) vs current working directory (after).",
     help_template = "\
 {bin} {version}
 {about}
@@ -113,7 +115,9 @@ Modes:
   mdcode diff <directory> <n> <m>
     => Compare commit selected by n (before) vs commit selected by m (after).
   mdcode diff <directory> H <n>
-    => Compare GitHub HEAD (before) vs local commit selected by n (after)."
+    => Compare GitHub HEAD (before) vs local commit selected by n (after).
+  mdcode diff <directory> L
+    => Compare GitHub HEAD (before) vs current working directory (after)."
     )]
     Diff {
         /// Directory of the repository to diff
@@ -550,6 +554,8 @@ fn diff_command(dir: &str, versions: &Vec<String>, dry_run: bool) -> Result<(), 
     let repo = Repository::open(dir)?;
     let before_commit = if versions.len() == 2 && versions[0].to_uppercase() == "H" {
         get_remote_head_commit(&repo, dir)?
+    } else if versions.len() == 1 && versions[0].to_uppercase() == "L" {
+        get_remote_head_commit(&repo, dir)?
     } else {
         let idx = if versions.is_empty() { 0 } else { versions[0].parse::<i32>().map_err(|_| "invalid repo indexes specified")? };
         match get_commit_by_index(&repo, idx) {
@@ -572,7 +578,9 @@ fn diff_command(dir: &str, versions: &Vec<String>, dry_run: bool) -> Result<(), 
     }
     log::info!("Checked out 'before' snapshot to {:?}", before_temp_dir);
 
-    let (after_dir, after_timestamp_str) = if versions.len() == 2 {
+    let (after_dir, after_timestamp_str) = if versions.len() == 1 && versions[0].to_uppercase() == "L" {
+        (PathBuf::from(dir), "current".to_string())
+    } else if versions.len() == 2 {
         if versions[0].to_uppercase() == "H" {
             let idx = versions[1].parse::<i32>().map_err(|_| "invalid repo indexes specified")?;
             let after_commit = match get_commit_by_index(&repo, idx) {
