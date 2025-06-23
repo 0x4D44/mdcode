@@ -38,7 +38,7 @@ const RESET: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.3.0",  // Updated version number
+    version = "1.4.0",  // Updated version number
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -66,7 +66,7 @@ OPTIONS:
 "
 )]
 struct Cli {
-    /// Command to run: new, update, info, diff, gh_create, or gh_push (short aliases shown)
+    /// Command to run: new, update, info, diff, gh_create, gh_push, gh_fetch, or gh_sync (short aliases shown)
     #[command(subcommand)]
     command: Commands,
 
@@ -146,6 +146,30 @@ Modes:
         #[arg(short, long, default_value = "origin")]
         remote: String,
     },
+    #[command(
+        name = "gh_fetch",
+        visible_alias = "gf",
+        about = "Fetch changes from the GitHub remote and list them"
+    )]
+    GhFetch {
+        /// Directory of the local repository
+        directory: String,
+        /// Name of the remote to fetch from (default: origin)
+        #[arg(short, long, default_value = "origin")]
+        remote: String,
+    },
+    #[command(
+        name = "gh_sync",
+        visible_alias = "gs",
+        about = "Synchronize the local repository with the GitHub remote"
+    )]
+    GhSync {
+        /// Directory of the local repository
+        directory: String,
+        /// Name of the remote to sync with (default: origin)
+        #[arg(short, long, default_value = "origin")]
+        remote: String,
+    },
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
@@ -199,6 +223,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         Commands::GhPush { directory, remote } => {
             log::info!("Pushing local repository '{}' to remote '{}'", directory, remote);
             gh_push(directory, remote)?;
+        },
+        Commands::GhFetch { directory, remote } => {
+            log::info!("Fetching remote changes for repository '{}' from '{}'", directory, remote);
+            gh_fetch(directory, remote)?;
+        },
+        Commands::GhSync { directory, remote } => {
+            log::info!("Synchronizing local repository '{}' with remote '{}'", directory, remote);
+            gh_sync(directory, remote)?;
         },
     }
     Ok(())
@@ -920,6 +952,73 @@ fn gh_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Erro
         Ok(())
     } else {
         Err("Failed to push changes.".into())
+    }
+}
+
+/// Fetch changes from the remote and list commits not yet merged.
+fn gh_fetch(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Fetching changes from remote '{}'...", remote);
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .arg("fetch")
+        .arg(remote)
+        .status()?;
+    if !status.success() {
+        return Err("git fetch failed".into());
+    }
+
+    let repo = Repository::open(directory)?;
+    let head_ref = repo.find_reference(&format!("refs/remotes/{}/HEAD", remote))?;
+    let target = head_ref.symbolic_target().ok_or("remote HEAD has no target")?;
+    let branch = target.trim_start_matches(&format!("refs/remotes/{}/", remote));
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .arg("log")
+        .arg("--oneline")
+        .arg(format!("HEAD..{}/{}", remote, branch))
+        .output()?;
+    if !output.status.success() {
+        return Err("git log failed".into());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.trim().is_empty() {
+        println!("Local repository is up to date with remote.");
+    } else {
+        println!("Commits available on remote:");
+        print!("{}", text);
+    }
+    Ok(())
+}
+
+/// Pull changes from the remote to synchronize the local repository.
+fn gh_sync(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = Repository::open(directory)?;
+    let head = repo.head()?;
+    let branch = head.shorthand().unwrap_or("master");
+
+    let exists = remote_branch_exists(directory, remote, branch)?;
+    if !exists {
+        println!("Remote branch '{}' does not exist. Skipping sync.", branch);
+        return Ok(());
+    }
+
+    println!("Pulling changes from remote '{}' for branch '{}'", remote, branch);
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .arg("pull")
+        .arg(remote)
+        .arg(branch)
+        .status()?;
+    if status.success() {
+        println!("Repository synchronized with remote.");
+        Ok(())
+    } else {
+        Err("git pull failed".into())
     }
 }
 
