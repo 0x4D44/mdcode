@@ -495,7 +495,7 @@ fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit, Box<
 }
 
 /// Retrieve the commit pointed to by the remote HEAD on GitHub.
-fn get_remote_head_commit(dir: &str) -> Result<git2::Commit, Box<dyn Error>> {
+fn get_remote_head_commit<'repo>(repo: &'repo Repository, dir: &str) -> Result<git2::Commit<'repo>, Box<dyn Error>> {
     // Fetch the latest changes from the remote named "origin".
     let fetch_status = Command::new("git")
         .arg("-C")
@@ -507,7 +507,6 @@ fn get_remote_head_commit(dir: &str) -> Result<git2::Commit, Box<dyn Error>> {
         return Err("git fetch failed".into());
     }
 
-    let repo = Repository::open(dir)?;
     // origin/HEAD is a symbolic reference to the default branch.
     let head_ref = repo.find_reference("refs/remotes/origin/HEAD")?;
     let target = head_ref
@@ -522,7 +521,7 @@ fn get_remote_head_commit(dir: &str) -> Result<git2::Commit, Box<dyn Error>> {
 fn diff_command(dir: &str, versions: &Vec<String>, dry_run: bool) -> Result<(), Box<dyn Error>> {
     let repo = Repository::open(dir)?;
     let before_commit = if versions.len() == 2 && versions[0].to_uppercase() == "H" {
-        get_remote_head_commit(dir)?
+        get_remote_head_commit(&repo, dir)?
     } else {
         let idx = if versions.is_empty() { 0 } else { versions[0].parse::<i32>().map_err(|_| "invalid repo indexes specified")? };
         match get_commit_by_index(&repo, idx) {
