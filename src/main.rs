@@ -968,9 +968,16 @@ fn gh_fetch(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Err
     }
 
     let repo = Repository::open(directory)?;
-    let head_ref = repo.find_reference(&format!("refs/remotes/{}/HEAD", remote))?;
-    let target = head_ref.symbolic_target().ok_or("remote HEAD has no target")?;
-    let branch = target.trim_start_matches(&format!("refs/remotes/{}/", remote));
+    let head = repo.head()?;
+    let branch = head
+        .shorthand()
+        .ok_or("HEAD does not point to a branch")?;
+
+    // Only show logs if the remote branch exists
+    if !remote_branch_exists(directory, remote, branch)? {
+        println!("Remote branch '{}/{}' does not exist.", remote, branch);
+        return Ok(());
+    }
 
     let output = Command::new("git")
         .arg("-C")
