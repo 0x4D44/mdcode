@@ -496,6 +496,9 @@ fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit, Box<
 
 /// Retrieve the commit pointed to by the remote HEAD on GitHub.
 fn get_remote_head_commit<'repo>(repo: &'repo Repository, dir: &str) -> Result<git2::Commit<'repo>, Box<dyn Error>> {
+    // Ensure the remote exists.
+    repo.find_remote("origin").map_err(|_| "Remote 'origin' not found")?;
+
     // Fetch the latest changes from the remote named "origin".
     let fetch_status = Command::new("git")
         .arg("-C")
@@ -507,8 +510,33 @@ fn get_remote_head_commit<'repo>(repo: &'repo Repository, dir: &str) -> Result<g
         return Err("git fetch failed".into());
     }
 
-    // origin/HEAD is a symbolic reference to the default branch.
-    let head_ref = repo.find_reference("refs/remotes/origin/HEAD")?;
+    // Try the symbolic origin/HEAD reference first.
+    let head_ref = match repo.find_reference("refs/remotes/origin/HEAD") {
+        Ok(r) => r,
+        Err(_) => {
+            // Fallback: determine the default branch via `git remote show origin`.
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .arg("remote")
+                .arg("show")
+                .arg("origin")
+                .output()?;
+            if !output.status.success() {
+                return Err("git remote show origin failed".into());
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let branch = stdout
+                .lines()
+                .find(|l| l.trim_start().starts_with("HEAD branch:"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|b| b.trim())
+                .ok_or("Unable to determine default branch on origin")?;
+            let ref_name = format!("refs/remotes/origin/{}", branch);
+            repo.find_reference(&ref_name)?
+        }
+    };
+
     let target = head_ref
         .symbolic_target()
         .ok_or("origin/HEAD has no target")?;
