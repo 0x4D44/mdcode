@@ -541,12 +541,19 @@ fn get_remote_head_commit<'repo>(repo: &'repo Repository, dir: &str) -> Result<g
         }
     };
 
-    let target = head_ref
-        .symbolic_target()
-        .ok_or("origin/HEAD has no target")?;
-    let branch_ref = repo.find_reference(target)?;
-    let oid = branch_ref.target().ok_or("Remote HEAD has no target")?;
-    repo.find_commit(oid).map_err(|e| e.into())
+    // origin/HEAD should normally be a symbolic ref to the default branch.
+    // However some remotes may create it as a direct ref to a commit.
+    // Try symbolic target first, falling back to the direct target if needed.
+    if let Some(target) = head_ref.symbolic_target() {
+        let branch_ref = repo.find_reference(target)?;
+        let oid = branch_ref.target().ok_or("Remote HEAD has no target")?;
+        repo.find_commit(oid).map_err(|e| e.into())
+    } else if let Some(oid) = head_ref.target() {
+        // origin/HEAD points directly to a commit
+        repo.find_commit(oid).map_err(|e| e.into())
+    } else {
+        Err("origin/HEAD has no target".into())
+    }
 }
 
 /// Diff commits based on provided version numbers.
