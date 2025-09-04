@@ -7,16 +7,16 @@ diffing repository versions, and integrating with GitHub (creating a repo and pu
 Key features and structure:
 - Uses Clap for parsing command-line arguments.
 - Leverages git2 for Git repository operations (initial commit, diffing, etc.).
-- Scans directories for source files using WalkDir while filtering out build artifact directories 
+- Scans directories for source files using WalkDir while filtering out build artifact directories
   ("target", "bin", "obj", "venv", ".venv", "env") that are commonly generated in various build and virtual environment setups.
 - Provides utility functions for generating a .gitignore file, detecting file types, and checking out Git trees.
 - Uses colored logging to provide clear output to the user.
 - Integrates with GitHub using octocrab for API calls.
 */
 
+use chrono::{LocalResult, TimeZone, Utc};
 use clap::{Parser, Subcommand};
-use git2::{Delta, Repository, Signature, ErrorCode, ObjectType, Sort};
-use chrono::{Utc, TimeZone, LocalResult};
+use git2::{Delta, ErrorCode, ObjectType, Repository, Signature, Sort};
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -24,21 +24,20 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use walkdir::WalkDir;
-use octocrab;
 use tokio::runtime::Runtime;
+use walkdir::WalkDir;
 
 // Define our uniform color constants.
-const BLUE: &str = "\x1b[94m";    // Light blue
-const GREEN: &str = "\x1b[32m";     // Green
-const RED: &str = "\x1b[31m";       // Red
-const YELLOW: &str = "\x1b[93m";    // Light yellow
+const BLUE: &str = "\x1b[94m"; // Light blue
+const GREEN: &str = "\x1b[32m"; // Green
+const RED: &str = "\x1b[31m"; // Red
+const YELLOW: &str = "\x1b[93m"; // Light yellow
 const RESET: &str = "\x1b[0m";
 
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.5.0",  // Updated version number
+    version = "1.6.0",
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -193,12 +192,25 @@ fn run() -> Result<(), Box<dyn Error>> {
             log::info!("Displaying repository info for '{}'", directory);
             info_repository(directory)?;
         }
-        Commands::Diff { directory, versions } => {
-            log::info!("Diffing repository '{}' with versions {:?}", directory, versions);
+        Commands::Diff {
+            directory,
+            versions,
+        } => {
+            log::info!(
+                "Diffing repository '{}' with versions {:?}",
+                directory,
+                versions
+            );
             diff_command(directory, versions, cli.dry_run)?;
         }
-        Commands::GhCreate { directory, description } => {
-            log::info!("Creating GitHub repository from local directory '{}'", directory);
+        Commands::GhCreate {
+            directory,
+            description,
+        } => {
+            log::info!(
+                "Creating GitHub repository from local directory '{}'",
+                directory
+            );
             // Deduce repository name from the provided directory.
             let repo_name = {
                 let path = Path::new(directory);
@@ -208,7 +220,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                 } else {
                     path.to_path_buf()
                 };
-                actual.file_name()
+                actual
+                    .file_name()
                     .ok_or("Could not determine repository name from directory")?
                     .to_string_lossy()
                     .to_string()
@@ -217,25 +230,38 @@ fn run() -> Result<(), Box<dyn Error>> {
             let rt = Runtime::new()?;
             let created_repo = rt.block_on(gh_create(&repo_name, description.clone()))?;
             // Use the clone URL from the created repository.
-            let remote_url = created_repo.clone_url
+            let remote_url = created_repo
+                .clone_url
                 .ok_or("GitHub repository did not return a clone URL")?;
             // Add the remote "origin" to the local repository.
             add_remote(directory, "origin", remote_url.as_str())?;
             // Automatically push the current branch.
             gh_push(directory, "origin")?;
-        },
+        }
         Commands::GhPush { directory, remote } => {
-            log::info!("Pushing local repository '{}' to remote '{}'", directory, remote);
+            log::info!(
+                "Pushing local repository '{}' to remote '{}'",
+                directory,
+                remote
+            );
             gh_push(directory, remote)?;
-        },
+        }
         Commands::GhFetch { directory, remote } => {
-            log::info!("Fetching remote changes for repository '{}' from '{}'", directory, remote);
+            log::info!(
+                "Fetching remote changes for repository '{}' from '{}'",
+                directory,
+                remote
+            );
             gh_fetch(directory, remote)?;
-        },
+        }
         Commands::GhSync { directory, remote } => {
-            log::info!("Synchronizing local repository '{}' with remote '{}'", directory, remote);
+            log::info!(
+                "Synchronizing local repository '{}' with remote '{}'",
+                directory,
+                remote
+            );
             gh_sync(directory, remote)?;
-        },
+        }
     }
     Ok(())
 }
@@ -266,12 +292,12 @@ fn main() {
 /// `bin`, `obj`, `venv`, `.venv`, and `env`.
 fn is_in_excluded_dir(entry: &walkdir::DirEntry) -> bool {
     entry.path().components().any(|comp| {
-        comp.as_os_str() == "target" ||
-        comp.as_os_str() == "bin" ||
-        comp.as_os_str() == "obj" ||
-        comp.as_os_str() == "venv" ||
-        comp.as_os_str() == ".venv" ||
-        comp.as_os_str() == "env"
+        comp.as_os_str() == "target"
+            || comp.as_os_str() == "bin"
+            || comp.as_os_str() == "obj"
+            || comp.as_os_str() == "venv"
+            || comp.as_os_str() == ".venv"
+            || comp.as_os_str() == "env"
     })
 }
 
@@ -293,7 +319,7 @@ fn new_repository(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
 
     let total_files = scan_total_files(dir)?;
     let (source_files, _source_count) = scan_source_files(dir)?;
-    
+
     if !Path::new(dir).exists() {
         log::info!("Directory '{}' does not exist. Creating...", dir);
         if !dry_run {
@@ -317,20 +343,32 @@ fn new_repository(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
         index.write()?;
         let tree_id = index.write_tree()?;
         let tree = repo.find_tree(tree_id)?;
-        let signature = Signature::now("mdcode", "mdcode@example.com")?;
-        repo.commit(Some("HEAD"), &signature, &signature, "Initial commit", &tree, &[])?;
+        let signature = repo
+            .signature()
+            .unwrap_or(Signature::now("mdcode", "mdcode@example.com")?);
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Initial commit",
+            &tree,
+            &[],
+        )?;
         count
     };
 
-    log::info!("{}New files added:{} {}",
+    log::info!(
+        "{}New files added:{} {}",
         BLUE,
         RESET,
-        source_files.iter()
+        source_files
+            .iter()
             .map(|p| format!("{}{}{}", GREEN, p.to_string_lossy(), RESET))
             .collect::<Vec<String>>()
             .join(", ")
     );
-    log::info!("{}Final result:{} {}{} source files added out of {} total files{}",
+    log::info!(
+        "{}Final result:{} {}{} source files added out of {} total files{}",
         BLUE,
         RESET,
         YELLOW,
@@ -344,11 +382,20 @@ fn new_repository(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
 
 /// Update an existing repository by staging changes and creating a commit.
 /// After staging, if commit_msg is None the user is prompted for a commit message (defaulting to "Updated files").
-fn update_repository(dir: &str, dry_run: bool, commit_msg: Option<&str>) -> Result<(), Box<dyn Error>> {
+fn update_repository(
+    dir: &str,
+    dry_run: bool,
+    commit_msg: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
     let repo = match Repository::open(dir) {
         Ok(r) => r,
         Err(_) => {
-            log::error!("{}Error:{} No git repository in directory '{}'", BLUE, RESET, dir);
+            log::error!(
+                "{}Error:{} No git repository in directory '{}'",
+                BLUE,
+                RESET,
+                dir
+            );
             return Err("No git repository".into());
         }
     };
@@ -375,17 +422,17 @@ fn update_repository(dir: &str, dry_run: bool, commit_msg: Option<&str>) -> Resu
                     if let Some(path) = delta.new_file().path() {
                         changed_files.push(format!("{}{}{}", GREEN, path.to_string_lossy(), RESET));
                     }
-                },
+                }
                 Delta::Deleted => {
                     if let Some(path) = delta.old_file().path() {
                         changed_files.push(format!("{}{}{}", RED, path.to_string_lossy(), RESET));
                     }
-                },
+                }
                 _ => {
                     if let Some(path) = delta.new_file().path().or(delta.old_file().path()) {
                         changed_files.push(path.to_string_lossy().to_string());
                     }
-                },
+                }
             }
             true
         },
@@ -411,10 +458,24 @@ fn update_repository(dir: &str, dry_run: bool, commit_msg: Option<&str>) -> Resu
     };
     log::info!("{}Creating commit:{} '{}'", BLUE, RESET, final_message);
     if !dry_run {
-        let signature = Signature::now("mdcode", "mdcode@example.com")?;
-        repo.commit(Some("HEAD"), &signature, &signature, &final_message, &new_tree, &[&parent_commit])?;
+        let signature = repo
+            .signature()
+            .unwrap_or(Signature::now("mdcode", "mdcode@example.com")?);
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            &final_message,
+            &new_tree,
+            &[&parent_commit],
+        )?;
     }
-    log::info!("{}{} changes staged and committed.{}", YELLOW, changed_files.len(), RESET);
+    log::info!(
+        "{}{} changes staged and committed.{}",
+        YELLOW,
+        changed_files.len(),
+        RESET
+    );
     Ok(())
 }
 
@@ -443,11 +504,9 @@ fn scan_source_files(dir: &str) -> Result<(Vec<PathBuf>, usize), Box<dyn Error>>
         if is_in_excluded_dir(&entry) {
             continue;
         }
-        if entry.file_type().is_file() {
-            if detect_file_type(entry.path()).is_some() {
-                source_files.push(entry.path().to_path_buf());
-                count += 1;
-            }
+        if entry.file_type().is_file() && detect_file_type(entry.path()).is_some() {
+            source_files.push(entry.path().to_path_buf());
+            count += 1;
         }
     }
     log::debug!("{} source files found", count);
@@ -455,7 +514,7 @@ fn scan_source_files(dir: &str) -> Result<(Vec<PathBuf>, usize), Box<dyn Error>>
 }
 
 /// Add the provided source files to the Git index.
-fn add_files_to_git(dir: &str, files: &Vec<PathBuf>, dry_run: bool) -> Result<usize, Box<dyn Error>> {
+fn add_files_to_git(dir: &str, files: &[PathBuf], dry_run: bool) -> Result<usize, Box<dyn Error>> {
     let repo = Repository::open(dir)?;
     let mut index = repo.index()?;
     for file in files {
@@ -492,16 +551,21 @@ fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit, Box<
     revwalk.set_sorting(Sort::TIME)?;
     let commits: Vec<_> = revwalk.collect::<Result<Vec<_>, _>>()?;
     if (idx as usize) < commits.len() {
-        repo.find_commit(commits[idx as usize]).map_err(|e| e.into())
+        repo.find_commit(commits[idx as usize])
+            .map_err(|e| e.into())
     } else {
         Err("Index out of bounds".into())
     }
 }
 
 /// Retrieve the commit pointed to by the remote HEAD on GitHub.
-fn get_remote_head_commit<'repo>(repo: &'repo Repository, dir: &str) -> Result<git2::Commit<'repo>, Box<dyn Error>> {
+fn get_remote_head_commit<'repo>(
+    repo: &'repo Repository,
+    dir: &str,
+) -> Result<git2::Commit<'repo>, Box<dyn Error>> {
     // Ensure the remote exists.
-    repo.find_remote("origin").map_err(|_| "Remote 'origin' not found")?;
+    repo.find_remote("origin")
+        .map_err(|_| "Remote 'origin' not found")?;
 
     // Fetch the latest changes from the remote named "origin".
     let fetch_status = Command::new("git")
@@ -557,14 +621,20 @@ fn get_remote_head_commit<'repo>(repo: &'repo Repository, dir: &str) -> Result<g
 }
 
 /// Diff commits based on provided version numbers.
-fn diff_command(dir: &str, versions: &Vec<String>, dry_run: bool) -> Result<(), Box<dyn Error>> {
+fn diff_command(dir: &str, versions: &[String], dry_run: bool) -> Result<(), Box<dyn Error>> {
     let repo = Repository::open(dir)?;
-    let before_commit = if versions.len() == 2 && versions[0].to_uppercase() == "H" {
-        get_remote_head_commit(&repo, dir)?
-    } else if versions.len() == 1 && versions[0].to_uppercase() == "L" {
+    let before_commit = if (versions.len() == 2 && versions[0].eq_ignore_ascii_case("H"))
+        || (versions.len() == 1 && versions[0].eq_ignore_ascii_case("L"))
+    {
         get_remote_head_commit(&repo, dir)?
     } else {
-        let idx = if versions.is_empty() { 0 } else { versions[0].parse::<i32>().map_err(|_| "invalid repo indexes specified")? };
+        let idx = if versions.is_empty() {
+            0
+        } else {
+            versions[0]
+                .parse::<i32>()
+                .map_err(|_| "invalid repo indexes specified")?
+        };
         match get_commit_by_index(&repo, idx) {
             Ok(c) => c,
             Err(_) => {
@@ -585,57 +655,68 @@ fn diff_command(dir: &str, versions: &Vec<String>, dry_run: bool) -> Result<(), 
     }
     log::info!("Checked out 'before' snapshot to {:?}", before_temp_dir);
 
-    let (after_dir, after_timestamp_str) = if versions.len() == 1 && versions[0].to_uppercase() == "L" {
-        (PathBuf::from(dir), "current".to_string())
-    } else if versions.len() == 2 {
-        if versions[0].to_uppercase() == "H" {
-            let idx = versions[1].parse::<i32>().map_err(|_| "invalid repo indexes specified")?;
-            let after_commit = match get_commit_by_index(&repo, idx) {
-                Ok(c) => c,
-                Err(_) => {
-                    log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
-                    return Err("invalid repo indexes specified".into());
+    let (after_dir, after_timestamp_str) =
+        if versions.len() == 1 && versions[0].to_uppercase() == "L" {
+            (PathBuf::from(dir), "current".to_string())
+        } else if versions.len() == 2 {
+            if versions[0].to_uppercase() == "H" {
+                let idx = versions[1]
+                    .parse::<i32>()
+                    .map_err(|_| "invalid repo indexes specified")?;
+                let after_commit = match get_commit_by_index(&repo, idx) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
+                        return Err("invalid repo indexes specified".into());
+                    }
+                };
+                let after_tree = after_commit.tree()?;
+                let after_timestamp = match Utc.timestamp_opt(after_commit.time().seconds(), 0) {
+                    LocalResult::Single(dt) => dt.naive_utc().format("%Y-%m-%d_%H%M%S").to_string(),
+                    _ => return Err("Invalid timestamp".into()),
+                };
+                let after_prefix = format!("after.{}.{}", dir, after_timestamp);
+                let temp = create_temp_dir(&after_prefix)?;
+                if !dry_run {
+                    checkout_tree_to_dir(&repo, &after_tree, &temp)?;
                 }
-            };
-            let after_tree = after_commit.tree()?;
-            let after_timestamp = match Utc.timestamp_opt(after_commit.time().seconds(), 0) {
-                LocalResult::Single(dt) => dt.naive_utc().format("%Y-%m-%d_%H%M%S").to_string(),
-                _ => return Err("Invalid timestamp".into()),
-            };
-            let after_prefix = format!("after.{}.{}", dir, after_timestamp);
-            let temp = create_temp_dir(&after_prefix)?;
-            if !dry_run {
-                checkout_tree_to_dir(&repo, &after_tree, &temp)?;
+                log::info!("Checked out 'after' snapshot to {:?}", temp);
+                (temp, after_timestamp)
+            } else {
+                let idx = versions[1]
+                    .parse::<i32>()
+                    .map_err(|_| "invalid repo indexes specified")?;
+                let after_commit = match get_commit_by_index(&repo, idx) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
+                        return Err("invalid repo indexes specified".into());
+                    }
+                };
+                let after_tree = after_commit.tree()?;
+                let after_timestamp = match Utc.timestamp_opt(after_commit.time().seconds(), 0) {
+                    LocalResult::Single(dt) => dt.naive_utc().format("%Y-%m-%d_%H%M%S").to_string(),
+                    _ => return Err("Invalid timestamp".into()),
+                };
+                let after_prefix = format!("after.{}.{}", dir, after_timestamp);
+                let temp = create_temp_dir(&after_prefix)?;
+                if !dry_run {
+                    checkout_tree_to_dir(&repo, &after_tree, &temp)?;
+                }
+                log::info!("Checked out 'after' snapshot to {:?}", temp);
+                (temp, after_timestamp)
             }
-            log::info!("Checked out 'after' snapshot to {:?}", temp);
-            (temp, after_timestamp)
         } else {
-            let idx = versions[1].parse::<i32>().map_err(|_| "invalid repo indexes specified")?;
-            let after_commit = match get_commit_by_index(&repo, idx) {
-                Ok(c) => c,
-                Err(_) => {
-                    log::error!("{}Error:{} invalid repo indexes specified", BLUE, RESET);
-                    return Err("invalid repo indexes specified".into());
-                }
-            };
-            let after_tree = after_commit.tree()?;
-            let after_timestamp = match Utc.timestamp_opt(after_commit.time().seconds(), 0) {
-                LocalResult::Single(dt) => dt.naive_utc().format("%Y-%m-%d_%H%M%S").to_string(),
-                _ => return Err("Invalid timestamp".into()),
-            };
-            let after_prefix = format!("after.{}.{}", dir, after_timestamp);
-            let temp = create_temp_dir(&after_prefix)?;
-            if !dry_run {
-                checkout_tree_to_dir(&repo, &after_tree, &temp)?;
-            }
-            log::info!("Checked out 'after' snapshot to {:?}", temp);
-            (temp, after_timestamp)
-        }
-    } else {
-        (PathBuf::from(dir), "current".to_string())
-    };
+            (PathBuf::from(dir), "current".to_string())
+        };
 
-    log::info!("{}Comparing {} with {}{}", YELLOW, before_timestamp, after_timestamp_str, RESET);
+    log::info!(
+        "{}Comparing {} with {}{}",
+        YELLOW,
+        before_timestamp,
+        after_timestamp_str,
+        RESET
+    );
 
     // Launch the diff tool only if not a dry run.
     if !dry_run {
@@ -652,14 +733,17 @@ fn launch_diff_tool(before: &Path, after: &Path) -> Result<(), Box<dyn Error>> {
         Ok(_) => {
             log::info!("Launched WinMergeU.exe.");
             Ok(())
-        },
+        }
         Err(e) => {
-            log::warn!("WinMergeU.exe failed to launch: {}. Trying windiff.exe...", e);
+            log::warn!(
+                "WinMergeU.exe failed to launch: {}. Trying windiff.exe...",
+                e
+            );
             match Command::new("windiff.exe").arg(before).arg(after).spawn() {
                 Ok(_) => {
                     log::info!("Launched windiff.exe.");
                     Ok(())
-                },
+                }
                 Err(e2) => {
                     Err(format!("Failed to launch both diff tools. Windiff error: {}", e2).into())
                 }
@@ -677,37 +761,37 @@ fn detect_file_type(file_path: &Path) -> Option<&'static str> {
             return Some("License");
         }
     }
-    
+
     let extension = file_path.extension()?.to_str()?.to_lowercase();
     match extension.as_str() {
         // Source Code
-        "c"  => Some("C"),
+        "c" => Some("C"),
         "cpp" | "cc" | "cxx" => Some("C++"),
-        "h"  => Some("C/C++ Header"),
+        "h" => Some("C/C++ Header"),
         "hpp" | "hh" | "hxx" => Some("C++ Header"),
         "java" => Some("Java"),
-        "py"   => Some("Python"),
-        "rb"   => Some("Ruby"),
-        "cs"   => Some("C#"),
-        "go"   => Some("Go"),
-        "php"  => Some("PHP"),
-        "rs"   => Some("Rust"),
+        "py" => Some("Python"),
+        "rb" => Some("Ruby"),
+        "cs" => Some("C#"),
+        "go" => Some("Go"),
+        "php" => Some("PHP"),
+        "rs" => Some("Rust"),
         "swift" => Some("Swift"),
         "kt" | "kts" => Some("Kotlin"),
         "scala" => Some("Scala"),
-        "js"  | "jsx" => Some("JavaScript"),
-        "ts"  | "tsx" => Some("TypeScript"),
-        "sh"  | "bash" | "zsh" => Some("Shell Script"),
-        "bat"  => Some("Batch Script"),
-        "ps1"  => Some("PowerShell"),
+        "js" | "jsx" => Some("JavaScript"),
+        "ts" | "tsx" => Some("TypeScript"),
+        "sh" | "bash" | "zsh" => Some("Shell Script"),
+        "bat" => Some("Batch Script"),
+        "ps1" => Some("PowerShell"),
         // Markup / Documentation
         "html" | "htm" => Some("HTML"),
         "css" | "scss" | "sass" | "less" => Some("CSS"),
-        "xml"  => Some("XML"),
+        "xml" => Some("XML"),
         "json" => Some("JSON"),
-        "yml"  | "yaml" => Some("YAML"),
+        "yml" | "yaml" => Some("YAML"),
         "toml" => Some("TOML"),
-        "md"   | "txt" | "rst" | "adoc" => Some("Documentation"),
+        "md" | "txt" | "rst" | "adoc" => Some("Documentation"),
         // Configuration / Build
         "ini" | "cfg" | "conf" => Some("Configuration"),
         "sln" => Some("Solution File"),
@@ -748,8 +832,10 @@ fn info_repository(dir: &str) -> Result<(), Box<dyn Error>> {
     };
 
     if let Err(e) = repo.head() {
-        if e.message().contains("reference 'refs/heads/master' not found")
-            || e.message().contains("reference 'refs/heads/main' not found")
+        if e.message()
+            .contains("reference 'refs/heads/master' not found")
+            || e.message()
+                .contains("reference 'refs/heads/main' not found")
         {
             log::error!("Git repository exists in '{}' but no commits - probably initialized via 'cargo new'", dir);
             return Err("Empty repository: no commits exist".into());
@@ -793,17 +879,17 @@ fn info_repository(dir: &str) -> Result<(), Box<dyn Error>> {
                         if let Some(path) = delta.new_file().path() {
                             file_list.push(format!("{}{}{}", GREEN, path.to_string_lossy(), RESET));
                         }
-                    },
+                    }
                     Delta::Deleted => {
                         if let Some(path) = delta.old_file().path() {
                             file_list.push(format!("{}{}{}", RED, path.to_string_lossy(), RESET));
                         }
-                    },
+                    }
                     _ => {
                         if let Some(path) = delta.new_file().path().or(delta.old_file().path()) {
                             file_list.push(path.to_string_lossy().to_string());
                         }
-                    },
+                    }
                 }
                 true
             },
@@ -814,10 +900,17 @@ fn info_repository(dir: &str) -> Result<(), Box<dyn Error>> {
         // Calculate displayed index: newest commit is 0.
         let display_index = total - 1 - i;
         let idx_str = format!("[{:03}]", display_index);
-        log::info!("{}{} {} | {}M:{} {} | {}F:{} {}{}",
-            YELLOW, idx_str, formatted_time,
-            BLUE, RESET, summary,
-            BLUE, RESET, file_list.join(", "),
+        log::info!(
+            "{}{} {} | {}M:{} {} | {}F:{} {}{}",
+            YELLOW,
+            idx_str,
+            formatted_time,
+            BLUE,
+            RESET,
+            summary,
+            BLUE,
+            RESET,
+            file_list.join(", "),
             RESET
         );
     }
@@ -839,21 +932,18 @@ fn create_gitignore(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
 fn generate_gitignore_content(_dir: &str) -> Result<String, Box<dyn Error>> {
     log::debug!("Generating .gitignore content...");
     // Ignore common build and virtual environment directories
-    let ignore_patterns = vec![
-        "target/",
-        "bin/",
-        "obj/",
-        "venv/",
-        ".venv/",
-        "env/",
-        "*.tmp",
-        "*.log",
+    let ignore_patterns = [
+        "target/", "bin/", "obj/", "venv/", ".venv/", "env/", "*.tmp", "*.log",
     ];
     Ok(ignore_patterns.join("\n"))
 }
 
 /// Recursively check out a Git tree into the target directory.
-fn checkout_tree_to_dir(repo: &Repository, tree: &git2::Tree, target: &Path) -> Result<(), Box<dyn Error>> {
+fn checkout_tree_to_dir(
+    repo: &Repository,
+    tree: &git2::Tree,
+    target: &Path,
+) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(target)?;
     for entry in tree.iter() {
         let name = entry.name().ok_or("Invalid UTF-8 in filename")?;
@@ -862,12 +952,12 @@ fn checkout_tree_to_dir(repo: &Repository, tree: &git2::Tree, target: &Path) -> 
             Some(git2::ObjectType::Tree) => {
                 let subtree = repo.find_tree(entry.id())?;
                 checkout_tree_to_dir(repo, &subtree, &entry_path)?;
-            },
+            }
             Some(git2::ObjectType::Blob) => {
                 let blob = repo.find_blob(entry.id())?;
                 let mut file = File::create(&entry_path)?;
                 file.write_all(blob.content())?;
-            },
+            }
             _ => {}
         }
     }
@@ -877,17 +967,25 @@ fn checkout_tree_to_dir(repo: &Repository, tree: &git2::Tree, target: &Path) -> 
 /// Create a temporary directory with the given prefix.
 fn create_temp_dir(prefix: &str) -> Result<PathBuf, Box<dyn Error>> {
     let mut base = env::temp_dir();
-    let unique = format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos());
+    let unique = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
     base.push(format!("{}.{}", prefix, unique));
     fs::create_dir_all(&base)?;
     Ok(base)
 }
 
 /// Create a GitHub repository using the GitHub API.
-/// 
+///
 /// Requires the environment variable GITHUB_TOKEN to be set.
 /// Returns the created repository.
-async fn gh_create(name: &str, description: Option<String>) -> Result<octocrab::models::Repository, Box<dyn std::error::Error>> {
+async fn gh_create(
+    name: &str,
+    description: Option<String>,
+) -> Result<octocrab::models::Repository, Box<dyn std::error::Error>> {
     let token = std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN not set");
     let octocrab = octocrab::Octocrab::builder()
         .personal_token(token)
@@ -895,10 +993,13 @@ async fn gh_create(name: &str, description: Option<String>) -> Result<octocrab::
 
     // POST to /user/repos with a JSON payload containing "name" and "description"
     let repo: octocrab::models::Repository = octocrab
-        .post("/user/repos", Some(&serde_json::json!( {
-            "name": name,
-            "description": description.unwrap_or_default()
-        })))
+        .post(
+            "/user/repos",
+            Some(&serde_json::json!( {
+                "name": name,
+                "description": description.unwrap_or_default()
+            })),
+        )
         .await?;
     println!("Created GitHub repository: {}", repo.html_url);
     Ok(repo)
@@ -918,7 +1019,11 @@ fn add_remote(directory: &str, remote_name: &str, remote_url: &str) -> Result<()
 }
 
 /// Check if the remote branch exists.
-fn remote_branch_exists(directory: &str, remote: &str, branch: &str) -> Result<bool, Box<dyn Error>> {
+fn remote_branch_exists(
+    directory: &str,
+    remote: &str,
+    branch: &str,
+) -> Result<bool, Box<dyn Error>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(directory)
@@ -945,7 +1050,10 @@ fn gh_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Erro
     let branch_exists = remote_branch_exists(directory, remote, branch)?;
 
     if branch_exists {
-        println!("Auto-pulling changes from remote '{}' for branch '{}'", remote, branch);
+        println!(
+            "Auto-pulling changes from remote '{}' for branch '{}'",
+            remote, branch
+        );
         let pull_status = Command::new("git")
             .arg("-C")
             .arg(directory)
@@ -968,7 +1076,10 @@ fn gh_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Erro
         println!("Remote branch '{}' does not exist. Skipping pull.", branch);
     }
 
-    println!("Pushing local repository '{}' to remote '{}'", directory, remote);
+    println!(
+        "Pushing local repository '{}' to remote '{}'",
+        directory, remote
+    );
     let push_status = if branch_exists {
         Command::new("git")
             .arg("-C")
@@ -1012,9 +1123,7 @@ fn gh_fetch(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Err
 
     let repo = Repository::open(directory)?;
     let head = repo.head()?;
-    let branch = head
-        .shorthand()
-        .ok_or("HEAD does not point to a branch")?;
+    let branch = head.shorthand().ok_or("HEAD does not point to a branch")?;
 
     // Only show logs if the remote branch exists
     if !remote_branch_exists(directory, remote, branch)? {
@@ -1055,7 +1164,10 @@ fn gh_sync(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
-    println!("Pulling changes from remote '{}' for branch '{}'", remote, branch);
+    println!(
+        "Pulling changes from remote '{}' for branch '{}'",
+        remote, branch
+    );
     let status = Command::new("git")
         .arg("-C")
         .arg(directory)
@@ -1105,9 +1217,18 @@ mod tests {
         assert_eq!(detect_file_type(Path::new("test.ts")), Some("TypeScript"));
         assert_eq!(detect_file_type(Path::new("test.tsx")), Some("TypeScript"));
         assert_eq!(detect_file_type(Path::new("test.sh")), Some("Shell Script"));
-        assert_eq!(detect_file_type(Path::new("test.bash")), Some("Shell Script"));
-        assert_eq!(detect_file_type(Path::new("test.zsh")), Some("Shell Script"));
-        assert_eq!(detect_file_type(Path::new("test.bat")), Some("Batch Script"));
+        assert_eq!(
+            detect_file_type(Path::new("test.bash")),
+            Some("Shell Script")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("test.zsh")),
+            Some("Shell Script")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("test.bat")),
+            Some("Batch Script")
+        );
         assert_eq!(detect_file_type(Path::new("test.ps1")), Some("PowerShell"));
     }
 
@@ -1122,19 +1243,49 @@ mod tests {
         assert_eq!(detect_file_type(Path::new("config.yml")), Some("YAML"));
         assert_eq!(detect_file_type(Path::new("config.yaml")), Some("YAML"));
         assert_eq!(detect_file_type(Path::new("Cargo.toml")), Some("TOML"));
-        assert_eq!(detect_file_type(Path::new("README.md")), Some("Documentation"));
-        assert_eq!(detect_file_type(Path::new("notes.txt")), Some("Documentation"));
-        assert_eq!(detect_file_type(Path::new("manual.rst")), Some("Documentation"));
-        assert_eq!(detect_file_type(Path::new("guide.adoc")), Some("Documentation"));
+        assert_eq!(
+            detect_file_type(Path::new("README.md")),
+            Some("Documentation")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("notes.txt")),
+            Some("Documentation")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("manual.rst")),
+            Some("Documentation")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("guide.adoc")),
+            Some("Documentation")
+        );
 
         // Configuration / Build
-        assert_eq!(detect_file_type(Path::new("settings.ini")), Some("Configuration"));
-        assert_eq!(detect_file_type(Path::new("config.cfg")), Some("Configuration"));
-        assert_eq!(detect_file_type(Path::new("app.conf")), Some("Configuration"));
-        assert_eq!(detect_file_type(Path::new("project.sln")), Some("Solution File"));
-        assert_eq!(detect_file_type(Path::new("app.csproj")), Some("C# Project File"));
+        assert_eq!(
+            detect_file_type(Path::new("settings.ini")),
+            Some("Configuration")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("config.cfg")),
+            Some("Configuration")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("app.conf")),
+            Some("Configuration")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("project.sln")),
+            Some("Solution File")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("app.csproj")),
+            Some("C# Project File")
+        );
         assert_eq!(detect_file_type(Path::new("pom.xml")), Some("XML")); // Note: Maven's pom.xml is XML
-        assert_eq!(detect_file_type(Path::new("build.gradle")), Some("Gradle Build File"));
+        assert_eq!(
+            detect_file_type(Path::new("build.gradle")),
+            Some("Gradle Build File")
+        );
 
         // Database
         assert_eq!(detect_file_type(Path::new("schema.sql")), Some("SQL"));
@@ -1151,11 +1302,17 @@ mod tests {
         assert_eq!(detect_file_type(Path::new("image.tiff")), Some("Image"));
         assert_eq!(detect_file_type(Path::new("image.webp")), Some("Image"));
         // Vector and icons
-        assert_eq!(detect_file_type(Path::new("vector.svg")), Some("Vector Image"));
+        assert_eq!(
+            detect_file_type(Path::new("vector.svg")),
+            Some("Vector Image")
+        );
         assert_eq!(detect_file_type(Path::new("icon.ico")), Some("Icon"));
         assert_eq!(detect_file_type(Path::new("cursor.cur")), Some("Cursor"));
         // Other asset
-        assert_eq!(detect_file_type(Path::new("dialog.dlg")), Some("Dialog File"));
+        assert_eq!(
+            detect_file_type(Path::new("dialog.dlg")),
+            Some("Dialog File")
+        );
     }
 
     #[test]
@@ -1175,8 +1332,14 @@ mod tests {
         let repo_path = temp_dir.path().join("repo");
         let repo_str = repo_path.to_str().unwrap();
         new_repository(repo_str, false).unwrap();
-        assert!(Path::new(repo_str).join(".git").exists(), ".git directory should exist");
-        assert!(Path::new(repo_str).join(".gitignore").exists(), ".gitignore file should exist");
+        assert!(
+            Path::new(repo_str).join(".git").exists(),
+            ".git directory should exist"
+        );
+        assert!(
+            Path::new(repo_str).join(".gitignore").exists(),
+            ".gitignore file should exist"
+        );
     }
 
     #[test]
@@ -1197,7 +1360,10 @@ mod tests {
         let mut revwalk = repo.revwalk().unwrap();
         revwalk.push_head().unwrap();
         let commits: Vec<_> = revwalk.collect();
-        assert!(commits.len() >= 2, "Repository should have at least two commits");
+        assert!(
+            commits.len() >= 2,
+            "Repository should have at least two commits"
+        );
     }
 
     #[test]
