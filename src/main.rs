@@ -343,9 +343,13 @@ fn new_repository(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
         index.write()?;
         let tree_id = index.write_tree()?;
         let tree = repo.find_tree(tree_id)?;
-        let signature = repo
-            .signature()
-            .unwrap_or(Signature::now("mdcode", "mdcode@example.com")?);
+        let (signature, sig_src) = resolve_signature_with_source(&repo)?;
+        log::info!(
+            "Using Git author: {} <{}> (source: {})",
+            signature.name().unwrap_or("(unknown)"),
+            signature.email().unwrap_or("(unknown)"),
+            sig_src
+        );
         repo.commit(
             Some("HEAD"),
             &signature,
@@ -458,9 +462,13 @@ fn update_repository(
     };
     log::info!("{}Creating commit:{} '{}'", BLUE, RESET, final_message);
     if !dry_run {
-        let signature = repo
-            .signature()
-            .unwrap_or(Signature::now("mdcode", "mdcode@example.com")?);
+        let (signature, sig_src) = resolve_signature_with_source(&repo)?;
+        log::info!(
+            "Using Git author: {} <{}> (source: {})",
+            signature.name().unwrap_or("(unknown)"),
+            signature.email().unwrap_or("(unknown)"),
+            sig_src
+        );
         repo.commit(
             Some("HEAD"),
             &signature,
@@ -556,6 +564,39 @@ fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit, Box<
     } else {
         Err("Index out of bounds".into())
     }
+}
+
+/// Resolve the Git signature (name/email) and describe its source for logging.
+fn resolve_signature_with_source(repo: &Repository) -> Result<(Signature, String), Box<dyn Error>> {
+    if let (Ok(name), Ok(email)) = (
+        std::env::var("GIT_AUTHOR_NAME"),
+        std::env::var("GIT_AUTHOR_EMAIL"),
+    ) {
+        return Ok((Signature::now(&name, &email)?, "env:GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL".into()));
+    }
+    if let (Ok(name), Ok(email)) = (
+        std::env::var("GIT_COMMITTER_NAME"),
+        std::env::var("GIT_COMMITTER_EMAIL"),
+    ) {
+        return Ok((Signature::now(&name, &email)?, "env:GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL".into()));
+    }
+
+    if let Ok(cfg) = repo.config() {
+        let name = cfg.get_string("user.name").ok();
+        let email = cfg.get_string("user.email").ok();
+        if let (Some(name), Some(email)) = (name, email) {
+            return Ok((Signature::now(&name, &email)?, "git config (repo/global)".into()));
+        }
+    }
+    if let Ok(cfg) = git2::Config::open_default() {
+        let name = cfg.get_string("user.name").ok();
+        let email = cfg.get_string("user.email").ok();
+        if let (Some(name), Some(email)) = (name, email) {
+            return Ok((Signature::now(&name, &email)?, "git config (global)".into()));
+        }
+    }
+
+    Ok((Signature::now("mdcode", "mdcode@example.com")?, "mdcode fallback".into()))
 }
 
 /// Retrieve the commit pointed to by the remote HEAD on GitHub.
@@ -991,6 +1032,21 @@ async fn gh_create(
         .personal_token(token)
         .build()?;
 
+    // Identify the GitHub user tied to the token without exposing the token.
+    let me: serde_json::Value = octocrab.get("/user", None::<&()>).await?;
+    let login = me
+        .get("login")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)");
+    let email = me
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(hidden or null)");
+    println!(
+        "GitHub auth: login '{}' (email: {}) via env:GITHUB_TOKEN",
+        login, email
+    );
+
     // POST to /user/repos with a JSON payload containing "name" and "description"
     let repo: octocrab::models::Repository = octocrab
         .post(
@@ -1043,6 +1099,19 @@ fn remote_branch_exists(
 /// This function determines the current branch name from the repository HEAD.
 fn gh_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::open(directory)?;
+    let (sig, src) = resolve_signature_with_source(&repo)?;
+    let remote_url = repo
+        .find_remote(remote)
+        .ok()
+        .and_then(|r| r.url().map(|s| s.to_string()))
+        .unwrap_or_else(|| "(unknown)".into());
+    println!(
+        "Using Git author: {} <{}> (source: {}) | remote: {}",
+        sig.name().unwrap_or("(unknown)"),
+        sig.email().unwrap_or("(unknown)"),
+        src,
+        remote_url
+    );
     let head = repo.head()?;
     let branch = head.shorthand().unwrap_or("master");
 
@@ -1110,7 +1179,21 @@ fn gh_push(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Erro
 
 /// Fetch changes from the remote and list commits not yet merged.
 fn gh_fetch(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Fetching changes from remote '{}'...", remote);
+    let repo = Repository::open(directory)?;
+    let (sig, src) = resolve_signature_with_source(&repo)?;
+    let remote_url = repo
+        .find_remote(remote)
+        .ok()
+        .and_then(|r| r.url().map(|s| s.to_string()))
+        .unwrap_or_else(|| "(unknown)".into());
+    println!(
+        "Fetching from '{}' ({}) using Git author: {} <{}> (source: {})",
+        remote,
+        remote_url,
+        sig.name().unwrap_or("(unknown)"),
+        sig.email().unwrap_or("(unknown)"),
+        src
+    );
     let status = Command::new("git")
         .arg("-C")
         .arg(directory)
@@ -1121,7 +1204,6 @@ fn gh_fetch(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Err
         return Err("git fetch failed".into());
     }
 
-    let repo = Repository::open(directory)?;
     let head = repo.head()?;
     let branch = head.shorthand().ok_or("HEAD does not point to a branch")?;
 
@@ -1155,6 +1237,20 @@ fn gh_fetch(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Err
 /// Pull changes from the remote to synchronize the local repository.
 fn gh_sync(directory: &str, remote: &str) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Repository::open(directory)?;
+    let (sig, src) = resolve_signature_with_source(&repo)?;
+    let remote_url = repo
+        .find_remote(remote)
+        .ok()
+        .and_then(|r| r.url().map(|s| s.to_string()))
+        .unwrap_or_else(|| "(unknown)".into());
+    println!(
+        "Syncing with '{}' ({}) using Git author: {} <{}> (source: {})",
+        remote,
+        remote_url,
+        sig.name().unwrap_or("(unknown)"),
+        sig.email().unwrap_or("(unknown)"),
+        src
+    );
     let head = repo.head()?;
     let branch = head.shorthand().unwrap_or("master");
 
