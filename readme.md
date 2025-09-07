@@ -19,6 +19,7 @@
 - **Repository Info:** Display the latest commits and file change summaries.
  - **Diffing:** Compare different versions of your code using external diff tools, including GitHub HEAD and local comparisons.
 - **GitHub Integration:** Automatically create a GitHub repository, add it as a remote, and push your local branch.
+- **Release Tagging:** Create annotated git tags using the version from Cargo.toml or a provided version.
 - **Exclusion of Unwanted Files:** Automatically ignores directories like `target`, `bin`, `obj`, `venv`, `.venv`, and `env` so that build artifacts and virtual environments do not clutter your repository.
 - **Multi-Language Support:** Recognizes various file types (Rust, Python, C/C++, Java, etc.) to accurately identify source files.
 
@@ -44,3 +45,28 @@ Clone the repository and build it using Cargo:
 git clone https://github.com/yourusername/mdcode.git
 cd mdcode
 cargo build --release
+
+## Commands
+
+- `new <dir>` — Initialize a new repo with initial commit.
+- `update <dir>` — Stage changes and commit.
+- `info <dir>` — Show recent commits and file changes.
+- `diff <dir> [m] [n]` — Diff commits or vs. working tree.
+- `gh_create <dir> [--description <text>]` — Create a GitHub repo and push.
+- `gh_push <dir> [--remote <name>]` — Push the current branch.
+- `gh_fetch <dir> [--remote <name>]` — Fetch and list remote-only commits.
+- `gh_sync <dir> [--remote <name>]` — Pull to sync with remote.
+- `tag <dir> [--version <semver>] [--message <msg>] [--push] [--remote <name>] [--force] [--allow-dirty]` — Create an annotated tag on HEAD.
+
+### Tag examples
+
+```bash
+# Tag using version from Cargo.toml
+cargo run -- tag .
+
+# Tag with explicit version and message
+cargo run -- tag . --version 1.2.3 --message "Cut 1.2.3"
+
+# Overwrite existing tag and push to origin
+cargo run -- tag . --force --push
+```

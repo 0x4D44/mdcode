@@ -15,8 +15,9 @@ Key features and structure:
 */
 
 use chrono::{LocalResult, TimeZone, Utc};
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use git2::{Delta, ErrorCode, ObjectType, Repository, Signature, Sort};
+use semver::Version as SemverVersion;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -37,7 +38,7 @@ const RESET: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.6.0",
+    version = "1.7.0",
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -173,6 +174,33 @@ Modes:
         #[arg(short, long, default_value = "origin")]
         remote: String,
     },
+    #[command(
+        name = "tag",
+        visible_alias = "t",
+        about = "Create an annotated git tag for the current HEAD"
+    )]
+    Tag {
+        /// Directory of the local repository (e.g. '.' for current directory)
+        directory: String,
+        /// Optional explicit version (semver). If not provided, read Cargo.toml or prompt.
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Optional tag message. Defaults to 'Release v<version>'.
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Push the created tag to the remote after creation.
+        #[arg(long, action = ArgAction::SetTrue)]
+        push: bool,
+        /// Remote name to push to (used with --push). Defaults to 'origin'.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// Overwrite an existing tag of the same name.
+        #[arg(long, action = ArgAction::SetTrue)]
+        force: bool,
+        /// Allow tagging when the working tree has uncommitted changes.
+        #[arg(long, action = ArgAction::SetTrue)]
+        allow_dirty: bool,
+    },
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
@@ -262,6 +290,27 @@ fn run() -> Result<(), Box<dyn Error>> {
             );
             gh_sync(directory, remote)?;
         }
+        Commands::Tag {
+            directory,
+            version,
+            message,
+            push,
+            remote,
+            force,
+            allow_dirty,
+        } => {
+            log::info!("Tagging release in '{}'", directory);
+            tag_release(
+                directory,
+                version.clone(),
+                message.clone(),
+                *push,
+                remote,
+                *force,
+                *allow_dirty,
+                cli.dry_run,
+            )?;
+        }
     }
     Ok(())
 }
@@ -283,6 +332,173 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("{}Error:{} {}", BLUE, RESET, e);
         std::process::exit(1);
+    }
+}
+
+/// Read `[package].version` from `Cargo.toml` in `dir`.
+fn read_version_from_cargo_toml(dir: &str) -> Result<Option<String>, Box<dyn Error>> {
+    let cargo_toml_path = Path::new(dir).join("Cargo.toml");
+    if !cargo_toml_path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&cargo_toml_path)?;
+    let value: toml::Value = contents.parse::<toml::Value>()?;
+    if let Some(pkg) = value.get("package") {
+        if let Some(ver) = pkg.get("version").and_then(|v| v.as_str()) {
+            return Ok(Some(ver.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Check if working tree has uncommitted changes using `git status --porcelain`.
+fn is_dirty(dir: &str) -> Result<bool, Box<dyn Error>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("status")
+        .arg("--porcelain")
+        .output()?;
+    if !out.status.success() {
+        return Err("git status failed".into());
+    }
+    Ok(!String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+/// Normalize and validate a semver string, enforcing a leading 'v' in the tag.
+fn normalize_semver_tag(input: &str) -> Result<(SemverVersion, String), Box<dyn Error>> {
+    let trimmed = input.trim().trim_start_matches('v');
+    let parsed = SemverVersion::parse(trimmed)?;
+    let tag = format!("v{}", parsed);
+    Ok((parsed, tag))
+}
+
+/// Create an annotated tag for the current HEAD.
+#[allow(clippy::too_many_arguments)]
+fn tag_release(
+    directory: &str,
+    version_flag: Option<String>,
+    message_flag: Option<String>,
+    push: bool,
+    remote: &str,
+    force: bool,
+    allow_dirty: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn Error>> {
+    let repo = Repository::open(directory)?;
+
+    if !allow_dirty && is_dirty(directory)? {
+        return Err("working tree has uncommitted changes; commit or use --allow-dirty".into());
+    }
+
+    // Determine version: CLI flag > Cargo.toml > prompt
+    let version_str = if let Some(v) = version_flag {
+        v
+    } else if let Some(v) = read_version_from_cargo_toml(directory)? {
+        log::info!("Using version from Cargo.toml: {}", v);
+        v
+    } else {
+        print!("Enter version (e.g., 0.1.0): ");
+        io::stdout().flush()?;
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf)?;
+        buf.trim().to_string()
+    };
+
+    // Validate and normalize to tag name with leading 'v'
+    let (_semver, tag_name) = normalize_semver_tag(&version_str)?;
+    // Ensure message
+    let message = message_flag.unwrap_or_else(|| format!("Release {}", tag_name));
+
+    // Check existing tag
+    let tag_ref_name = format!("refs/tags/{}", tag_name);
+    let exists = repo.find_reference(&tag_ref_name).is_ok();
+    if exists && !force {
+        return Err(format!(
+            "tag '{}' already exists; use --force to overwrite",
+            tag_name
+        )
+        .into());
+    }
+
+    // Resolve HEAD commit
+    let head_obj = repo.head()?.resolve()?.peel(ObjectType::Commit)?;
+    let (sig, _src) = resolve_signature_with_source(&repo)?;
+
+    if dry_run {
+        log::info!(
+            "[dry-run] Would create annotated tag '{}' at HEAD",
+            tag_name
+        );
+        if push {
+            log::info!(
+                "[dry-run] Would push tag '{}' to remote '{}'",
+                tag_name,
+                remote
+            );
+        }
+        return Ok(());
+    }
+
+    // If force and tag exists, delete existing ref first
+    if exists && force {
+        if let Ok(mut r) = repo.find_reference(&tag_ref_name) {
+            r.delete()?;
+        }
+    }
+
+    repo.tag(&tag_name, &head_obj, &sig, &message, false)?;
+    println!("Created tag '{}'", tag_name);
+
+    if push {
+        // Validate remote exists
+        repo.find_remote(remote)
+            .map_err(|_| format!("remote '{}' not found", remote))?;
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .arg("push")
+            .arg(remote)
+            .arg(format!("refs/tags/{}", tag_name))
+            .status()?;
+        if !status.success() {
+            return Err("failed to push tag".into());
+        }
+        println!("Pushed tag '{}' to '{}'", tag_name, remote);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_tag {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write as IoWrite;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_normalize_semver_tag_variants() {
+        let (_, t1) = normalize_semver_tag("1.2.3").unwrap();
+        assert_eq!(t1, "v1.2.3");
+        let (_, t2) = normalize_semver_tag("v1.2.3").unwrap();
+        assert_eq!(t2, "v1.2.3");
+        let (_, t3) = normalize_semver_tag("  v2.0.0  ").unwrap();
+        assert_eq!(t3, "v2.0.0");
+    }
+
+    #[test]
+    fn test_read_version_from_cargo_toml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        let mut f = File::create(&path).unwrap();
+        writeln!(
+            f,
+            "[package]\nname=\"x\"\nversion=\"0.9.1\"\nedition=\"2021\"\n"
+        )
+        .unwrap();
+        let v = read_version_from_cargo_toml(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(v, Some("0.9.1".to_string()));
     }
 }
 
@@ -572,20 +788,29 @@ fn resolve_signature_with_source(repo: &Repository) -> Result<(Signature, String
         std::env::var("GIT_AUTHOR_NAME"),
         std::env::var("GIT_AUTHOR_EMAIL"),
     ) {
-        return Ok((Signature::now(&name, &email)?, "env:GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL".into()));
+        return Ok((
+            Signature::now(&name, &email)?,
+            "env:GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL".into(),
+        ));
     }
     if let (Ok(name), Ok(email)) = (
         std::env::var("GIT_COMMITTER_NAME"),
         std::env::var("GIT_COMMITTER_EMAIL"),
     ) {
-        return Ok((Signature::now(&name, &email)?, "env:GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL".into()));
+        return Ok((
+            Signature::now(&name, &email)?,
+            "env:GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL".into(),
+        ));
     }
 
     if let Ok(cfg) = repo.config() {
         let name = cfg.get_string("user.name").ok();
         let email = cfg.get_string("user.email").ok();
         if let (Some(name), Some(email)) = (name, email) {
-            return Ok((Signature::now(&name, &email)?, "git config (repo/global)".into()));
+            return Ok((
+                Signature::now(&name, &email)?,
+                "git config (repo/global)".into(),
+            ));
         }
     }
     if let Ok(cfg) = git2::Config::open_default() {
@@ -596,7 +821,10 @@ fn resolve_signature_with_source(repo: &Repository) -> Result<(Signature, String
         }
     }
 
-    Ok((Signature::now("mdcode", "mdcode@example.com")?, "mdcode fallback".into()))
+    Ok((
+        Signature::now("mdcode", "mdcode@example.com")?,
+        "mdcode fallback".into(),
+    ))
 }
 
 /// Retrieve the commit pointed to by the remote HEAD on GitHub.
