@@ -762,14 +762,14 @@ fn check_git_installed() -> bool {
 }
 
 /// Retrieve the last commit from the repository.
-fn get_last_commit(repo: &Repository) -> Result<git2::Commit, Box<dyn Error>> {
+fn get_last_commit(repo: &Repository) -> Result<git2::Commit<'_>, Box<dyn Error>> {
     let obj = repo.head()?.resolve()?.peel(ObjectType::Commit)?;
     let commit = obj.into_commit().map_err(|_| "Couldn't find commit")?;
     Ok(commit)
 }
 
 /// Retrieve a commit by index (0 is most recent, 1 is next, etc.).
-fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit, Box<dyn Error>> {
+fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit<'_>, Box<dyn Error>> {
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
     revwalk.set_sorting(Sort::TIME)?;
@@ -783,7 +783,7 @@ fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit, Box<
 }
 
 /// Resolve the Git signature (name/email) and describe its source for logging.
-fn resolve_signature_with_source(repo: &Repository) -> Result<(Signature, String), Box<dyn Error>> {
+fn resolve_signature_with_source(repo: &Repository) -> Result<(Signature<'_>, String), Box<dyn Error>> {
     if let (Ok(name), Ok(email)) = (
         std::env::var("GIT_AUTHOR_NAME"),
         std::env::var("GIT_AUTHOR_EMAIL"),
