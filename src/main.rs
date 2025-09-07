@@ -358,6 +358,7 @@ fn is_dirty(dir: &str) -> Result<bool, Box<dyn Error>> {
         .arg(dir)
         .arg("status")
         .arg("--porcelain")
+        .arg("--untracked-files=no")
         .output()?;
     if !out.status.success() {
         return Err("git status failed".into());
@@ -499,6 +500,68 @@ mod tests_tag {
         .unwrap();
         let v = read_version_from_cargo_toml(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(v, Some("0.9.1".to_string()));
+    }
+
+    #[test]
+    fn test_is_dirty_ignores_untracked() {
+        if !check_git_installed() {
+            eprintln!("git not installed; skipping test");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let d = dir.path();
+        // init repo
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .arg("init")
+            .status()
+            .unwrap();
+        // configure local git identity
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .arg("config")
+            .arg("user.name")
+            .arg("mdcode-test")
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .arg("config")
+            .arg("user.email")
+            .arg("mdcode@test.local")
+            .status()
+            .unwrap();
+
+        // create tracked file and commit
+        let mut tf = File::create(d.join("tracked.txt")).unwrap();
+        writeln!(tf, "hello").unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .arg("add")
+            .arg("tracked.txt")
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .arg("commit")
+            .arg("-m")
+            .arg("init")
+            .status()
+            .unwrap();
+        // create an untracked file
+        let mut uf = File::create(d.join("untracked.txt")).unwrap();
+        writeln!(uf, "temp").unwrap();
+        // is_dirty should be false (ignoring untracked)
+        assert_eq!(is_dirty(d.to_str().unwrap()).unwrap(), false);
+        // modify tracked file to make it dirty
+        let mut tf2 = File::create(d.join("tracked.txt")).unwrap();
+        writeln!(tf2, "more").unwrap();
+        assert_eq!(is_dirty(d.to_str().unwrap()).unwrap(), true);
     }
 }
 
