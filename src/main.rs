@@ -38,7 +38,7 @@ const RESET: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.7.0",
+    version = "1.8.0",
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -352,6 +352,7 @@ fn read_version_from_cargo_toml(dir: &str) -> Result<Option<String>, Box<dyn Err
 }
 
 /// Check if working tree has uncommitted changes using `git status --porcelain`.
+#[allow(dead_code)]
 fn is_dirty(dir: &str) -> Result<bool, Box<dyn Error>> {
     let out = Command::new("git")
         .arg("-C")
@@ -383,14 +384,13 @@ fn tag_release(
     push: bool,
     remote: &str,
     force: bool,
-    allow_dirty: bool,
+    _allow_dirty: bool,
     dry_run: bool,
 ) -> Result<(), Box<dyn Error>> {
     let repo = Repository::open(directory)?;
 
-    if !allow_dirty && is_dirty(directory)? {
-        return Err("working tree has uncommitted changes; commit or use --allow-dirty".into());
-    }
+    // Do not block on a dirty working tree; tagging uses HEAD.
+    // Keep --allow-dirty for backward compatibility but no longer enforce cleanliness by default.
 
     // Determine version: CLI flag > Cargo.toml > prompt
     let version_str = if let Some(v) = version_flag {
@@ -408,8 +408,8 @@ fn tag_release(
 
     // Validate and normalize to tag name with leading 'v'
     let (_semver, tag_name) = normalize_semver_tag(&version_str)?;
-    // Ensure message
-    let message = message_flag.unwrap_or_else(|| format!("Release {}", tag_name));
+    // Ensure message; default to tag name itself (e.g., "v0.1.0").
+    let message = message_flag.unwrap_or_else(|| tag_name.clone());
 
     // Check existing tag
     let tag_ref_name = format!("refs/tags/{}", tag_name);
@@ -422,33 +422,50 @@ fn tag_release(
         .into());
     }
 
-    // Resolve HEAD commit
-    let head_obj = repo.head()?.resolve()?.peel(ObjectType::Commit)?;
-    let (sig, _src) = resolve_signature_with_source(&repo)?;
-
     if dry_run {
         log::info!(
-            "[dry-run] Would create annotated tag '{}' at HEAD",
-            tag_name
+            "[dry-run] Would run: git -C {} tag -a {}{} -m \"{}\"",
+            directory,
+            tag_name,
+            if force { " -f" } else { "" },
+            message
         );
         if push {
             log::info!(
-                "[dry-run] Would push tag '{}' to remote '{}'",
-                tag_name,
-                remote
+                "[dry-run] Would run: git -C {} push {} {}",
+                directory,
+                remote,
+                tag_name
             );
         }
         return Ok(());
     }
 
-    // If force and tag exists, delete existing ref first
-    if exists && force {
-        if let Ok(mut r) = repo.find_reference(&tag_ref_name) {
-            r.delete()?;
-        }
+    // Create or update annotated tag via git CLI (matches user's expectation).
+    let mut tag_args = vec![
+        "-C",
+        directory,
+        "tag",
+        "-a",
+        &tag_name,
+        "-m",
+        &message,
+    ];
+    if exists && !force {
+        return Err(format!(
+            "tag '{}' already exists; use --force to overwrite",
+            tag_name
+        )
+        .into());
     }
-
-    repo.tag(&tag_name, &head_obj, &sig, &message, false)?;
+    if force {
+        // If --force was requested, add -f to update the tag.
+        tag_args.push("-f");
+    }
+    let status = Command::new("git").args(&tag_args).status()?;
+    if !status.success() {
+        return Err("failed to create tag via git".into());
+    }
     println!("Created tag '{}'", tag_name);
 
     if push {
@@ -460,7 +477,7 @@ fn tag_release(
             .arg(directory)
             .arg("push")
             .arg(remote)
-            .arg(format!("refs/tags/{}", tag_name))
+            .arg(&tag_name)
             .status()?;
         if !status.success() {
             return Err("failed to push tag".into());
