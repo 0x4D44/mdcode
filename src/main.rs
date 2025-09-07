@@ -783,7 +783,9 @@ fn get_commit_by_index(repo: &Repository, idx: i32) -> Result<git2::Commit<'_>, 
 }
 
 /// Resolve the Git signature (name/email) and describe its source for logging.
-fn resolve_signature_with_source(repo: &Repository) -> Result<(Signature<'_>, String), Box<dyn Error>> {
+fn resolve_signature_with_source(
+    repo: &Repository,
+) -> Result<(Signature<'_>, String), Box<dyn Error>> {
     if let (Ok(name), Ok(email)) = (
         std::env::var("GIT_AUTHOR_NAME"),
         std::env::var("GIT_AUTHOR_EMAIL"),
