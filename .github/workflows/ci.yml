@@ -27,8 +27,7 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Test
-        run: cargo test --all --locked
+        run: cargo test --all
 
       - name: Build release binary
-        run: cargo build --release --locked
-
+        run: cargo build --release
