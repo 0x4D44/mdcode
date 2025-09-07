@@ -442,15 +442,7 @@ fn tag_release(
     }
 
     // Create or update annotated tag via git CLI (matches user's expectation).
-    let mut tag_args = vec![
-        "-C",
-        directory,
-        "tag",
-        "-a",
-        &tag_name,
-        "-m",
-        &message,
-    ];
+    let mut tag_args = vec!["-C", directory, "tag", "-a", &tag_name, "-m", &message];
     if exists && !force {
         return Err(format!(
             "tag '{}' already exists; use --force to overwrite",
