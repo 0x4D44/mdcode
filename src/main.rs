@@ -188,9 +188,9 @@ Modes:
         /// Optional tag message. Defaults to 'Release v<version>'.
         #[arg(short, long)]
         message: Option<String>,
-        /// Push the created tag to the remote after creation.
-        #[arg(long, action = ArgAction::SetTrue)]
-        push: bool,
+        /// Do not push the created tag to the remote (pushes by default).
+        #[arg(long = "no-push", action = ArgAction::SetTrue)]
+        no_push: bool,
         /// Remote name to push to (used with --push). Defaults to 'origin'.
         #[arg(long, default_value = "origin")]
         remote: String,
@@ -294,7 +294,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             directory,
             version,
             message,
-            push,
+            no_push,
             remote,
             force,
             allow_dirty,
@@ -304,7 +304,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 directory,
                 version.clone(),
                 message.clone(),
-                *push,
+                !*no_push,
                 remote,
                 *force,
                 *allow_dirty,

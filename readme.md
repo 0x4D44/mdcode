@@ -56,17 +56,20 @@ cargo build --release
 - `gh_push <dir> [--remote <name>]` — Push the current branch.
 - `gh_fetch <dir> [--remote <name>]` — Fetch and list remote-only commits.
 - `gh_sync <dir> [--remote <name>]` — Pull to sync with remote.
-- `tag <dir> [--version <semver>] [--message <msg>] [--push] [--remote <name>] [--force] [--allow-dirty]` — Create an annotated tag on HEAD.
+- `tag <dir> [--version <semver>] [--message <msg>] [--remote <name>] [--force] [--allow-dirty] [--no-push]` — Create an annotated tag on HEAD and push it by default.
 
 ### Tag examples
 
 ```bash
-# Tag using version from Cargo.toml
-cargo run -- tag .
+# Tag using version from Cargo.toml and push
+mdcode tag .
 
-# Tag with explicit version and message
-cargo run -- tag . --version 1.2.3 --message "Cut 1.2.3"
+# Tag with explicit version and message (pushes by default)
+mdcode tag . --version 1.2.3 --message "Cut 1.2.3"
 
 # Overwrite existing tag and push to origin
-cargo run -- tag . --force --push
+mdcode tag . --force
+
+# Create tag but do not push
+mdcode tag . --no-push
 ```
