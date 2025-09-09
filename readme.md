@@ -53,7 +53,7 @@ cargo build --release
 - `update <dir>` — Stage changes and commit.
 - `info <dir>` — Show recent commits and file changes.
 - `diff <dir> [m] [n]` — Diff commits or vs. working tree.
-- `gh_create <dir> [--description <text>]` — Create a GitHub repo and push. Prefers GitHub CLI; falls back to API with `GITHUB_TOKEN`/`GH_TOKEN`.
+- `gh_create <dir> [--description <text>] [--public|--private|--internal]` — Create a GitHub repo and push. Prefers GitHub CLI; falls back to API with `GITHUB_TOKEN`/`GH_TOKEN`. If no visibility is provided, defaults to `--private`.
 - `gh_push <dir> [--remote <name>]` — Push the current branch.
 - `gh_fetch <dir> [--remote <name>]` — Fetch and list remote-only commits.
 - `gh_sync <dir> [--remote <name>]` — Pull to sync with remote.

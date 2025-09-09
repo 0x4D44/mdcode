@@ -35,10 +35,17 @@ const RED: &str = "\x1b[31m"; // Red
 const YELLOW: &str = "\x1b[93m"; // Light yellow
 const RESET: &str = "\x1b[0m";
 
+#[derive(Clone, Copy)]
+enum RepoVisibility {
+    Public,
+    Private,
+    Internal,
+}
+
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.9.0",
+    version = "1.9.1",
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -137,6 +144,15 @@ Modes:
         /// Optional description for the GitHub repository
         #[arg(short, long)]
         description: Option<String>,
+        /// Create the repository as public visibility
+        #[arg(long, action = ArgAction::SetTrue)]
+        public: bool,
+        /// Create the repository as private visibility (default)
+        #[arg(long, action = ArgAction::SetTrue)]
+        private: bool,
+        /// Create the repository as internal visibility (orgs only)
+        #[arg(long, action = ArgAction::SetTrue)]
+        internal: bool,
     },
     #[command(
         name = "gh_push",
@@ -234,6 +250,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         Commands::GhCreate {
             directory,
             description,
+            public,
+            private,
+            internal,
         } => {
             log::info!(
                 "Creating GitHub repository from local directory '{}'",
@@ -254,11 +273,24 @@ fn run() -> Result<(), Box<dyn Error>> {
                     .to_string_lossy()
                     .to_string()
             };
-            if gh_cli_available() {
+            // Determine visibility; default to private if unspecified.
+            let mut selected = None;
+            if *public { selected = Some(RepoVisibility::Public); }
+            if *private { selected = Some(RepoVisibility::Private); }
+            if *internal { selected = Some(RepoVisibility::Internal); }
+            // If multiple flags were provided, return an error.
+            let count = (*public as u8) + (*private as u8) + (*internal as u8);
+            if count > 1 {
+                return Err("Provide only one of --public/--private/--internal".into());
+            }
+            let visibility = selected.unwrap_or(RepoVisibility::Private);
+
+            if let Some(gh_cmd) = gh_cli_path() {
                 log::info!("Detected GitHub CLI. Using 'gh repo create' flow.");
-                gh_create_via_cli(directory, &repo_name, description.clone())?;
+                gh_create_via_cli(&gh_cmd, directory, &repo_name, description.clone(), visibility)?;
             } else {
                 log::info!("GitHub CLI not found. Falling back to API token auth.");
+                log::debug!("PATH: {}", env::var("PATH").unwrap_or_default());
                 let rt = Runtime::new()?;
                 let created_repo = rt.block_on(gh_create_api(&repo_name, description.clone()))?;
                 // Use the HTTPS clone URL from the created repository.
@@ -1375,21 +1407,69 @@ or set GITHUB_TOKEN/GH_TOKEN with repo scope."
     Ok(repo)
 }
 
-/// Check if GitHub CLI is available on PATH.
-fn gh_cli_available() -> bool {
-    Command::new("gh")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Locate the GitHub CLI executable if available.
+/// Returns a path to use when invoking the command.
+fn gh_cli_path() -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    // 1) Try the name via PATH first.
+    if let Ok(out) = Command::new("gh").arg("--version").output() {
+        if out.status.success() {
+            return Some(PathBuf::from("gh"));
+        }
+    }
+
+    // 2) On Windows, try `where gh` and typical install directories.
+    #[cfg(windows)]
+    {
+        if let Ok(out) = Command::new("where").arg("gh").output() {
+            if out.status.success() {
+                let txt = String::from_utf8_lossy(&out.stdout);
+                if let Some(first) = txt.lines().find(|l| !l.trim().is_empty()) {
+                    let p = Path::new(first.trim());
+                    if p.exists() {
+                        return Some(p.to_path_buf());
+                    }
+                }
+            }
+        }
+
+        // Try LocalAppData user install: %LOCALAPPDATA%\Programs\GitHub CLI\gh.exe
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let p = Path::new(&local).join("Programs").join("GitHub CLI").join("gh.exe");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+
+        // Try Program Files (x86) and Program Files locations.
+        for var in ["ProgramFiles(x86)", "ProgramFiles"] {
+            if let Ok(base) = std::env::var(var) {
+                let p = Path::new(&base).join("GitHub CLI").join("gh.exe");
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+
+        // Fallback to the canonical Program Files path if env vars are missing.
+        let default_path = Path::new("C:\\Program Files\\GitHub CLI\\gh.exe");
+        if default_path.exists() {
+            return Some(default_path.to_path_buf());
+        }
+    }
+
+    None
 }
 
 /// Create a GitHub repository using GitHub CLI and the system's authenticated credentials.
 /// This mirrors the existing flow by creating from the local directory, setting `origin`, and pushing.
 fn gh_create_via_cli(
+    gh_cmd: &std::path::Path,
     directory: &str,
     name: &str,
     description: Option<String>,
+    visibility: RepoVisibility,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut args = vec![
         "repo",
@@ -1400,14 +1480,18 @@ fn gh_create_via_cli(
         "--remote",
         "origin",
         "--push",
-        "--confirm",
     ];
     // Respect user default visibility; include description if provided.
     if let Some(desc) = description.as_deref() {
         args.push("--description");
         args.push(desc);
     }
-    let status = Command::new("gh").args(&args).status()?;
+    match visibility {
+        RepoVisibility::Public => args.push("--public"),
+        RepoVisibility::Private => args.push("--private"),
+        RepoVisibility::Internal => args.push("--internal"),
+    }
+    let status = Command::new(gh_cmd).args(&args).status()?;
     if !status.success() {
         return Err("GitHub CLI 'gh repo create' failed".into());
     }
