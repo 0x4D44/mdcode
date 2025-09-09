@@ -28,12 +28,13 @@
 ### Prerequisites
 - **Rust:** Install Rust from [rust-lang.org](https://www.rust-lang.org/tools/install).
 - **Git:** Ensure Git is installed. Download from [git-scm.com](https://git-scm.com/downloads).
-- **GitHub Personal Access Token:** For GitHub integration, create a personal access token with the necessary permissions (typically the `repo` scope).  
-  - On Windows:  
+- **GitHub CLI (optional, recommended):** Install [GitHub CLI](https://cli.github.com/). `gh_create` prefers `gh` (uses OS keychain/Windows Credential Manager). Run `gh auth login` once.
+- **GitHub Personal Access Token (fallback):** If `gh` is not available, set a token with `repo` scope.  
+  - On Windows:
     ```batch
     set GITHUB_TOKEN=your_token_here
-    ```  
-  - On Unix/Linux:  
+    ```
+  - On Unix/Linux:
     ```bash
     export GITHUB_TOKEN=your_token_here
     ```
@@ -52,7 +53,7 @@ cargo build --release
 - `update <dir>` — Stage changes and commit.
 - `info <dir>` — Show recent commits and file changes.
 - `diff <dir> [m] [n]` — Diff commits or vs. working tree.
-- `gh_create <dir> [--description <text>]` — Create a GitHub repo and push.
+- `gh_create <dir> [--description <text>]` — Create a GitHub repo and push. Prefers GitHub CLI; falls back to API with `GITHUB_TOKEN`/`GH_TOKEN`.
 - `gh_push <dir> [--remote <name>]` — Push the current branch.
 - `gh_fetch <dir> [--remote <name>]` — Fetch and list remote-only commits.
 - `gh_sync <dir> [--remote <name>]` — Pull to sync with remote.

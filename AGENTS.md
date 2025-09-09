@@ -1,39 +1,41 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/main.rs`: CLI implementation and core helpers (Clap, git2, octocrab, logging).
+- `src/main.rs`: CLI entrypoint and core helpers (Clap, git2, octocrab, logging).
 - `Cargo.toml` / `Cargo.lock`: crate metadata and dependencies.
-- `readme.md`: usage, features, and install notes.
-- `target/`: build artifacts (ignored by Git). Create `tests/` for integration tests when needed.
+- `readme.md`: usage, install, and command reference.
+- `target/`: build artifacts (ignored). Add `tests/` for integration tests when needed.
 
 ## Build, Test, and Development Commands
 - Build: `cargo build` (use `--release` for optimized binary).
-- Run locally: `cargo run -- <subcommand>`
+- Run: `cargo run -- <subcommand>`
   - Examples: `cargo run -- new .`, `cargo run -- update .`,
-    `cargo run -- diff . 0 1`, `cargo run -- gh_create . --description "Repo"`.
+    `cargo run -- diff . 0 1`, `cargo run -- gh_create . --description "Repo"`,
+    `cargo run -- gh_push .`, `cargo run -- gh_fetch .`, `cargo run -- gh_sync .`,
+    `cargo run -- tag . --version 1.2.3 --message "Cut 1.2.3"`.
 - Test: `cargo test`
 - Lint: `cargo clippy -- -D warnings`
 - Format: `cargo fmt --all`
 
 ## Coding Style & Naming Conventions
-- Formatting: Rustfmt (4 spaces, stable defaults). Run `cargo fmt` before commits.
-- Linting: Clippy must pass with no warnings in CI/PRs.
-- Naming: `snake_case` for files/functions, `CamelCase` for types/traits, `SCREAMING_SNAKE_CASE` for consts.
-- Logs: prefer `log::{info, warn, error, debug}` with concise messages.
+- Formatting: rustfmt (4 spaces, stable defaults). Run `cargo fmt` before commits.
+- Linting: clippy must pass with no warnings; treat warnings as errors in PRs.
+- Naming: `snake_case` (functions/files), `CamelCase` (types/traits), `SCREAMING_SNAKE_CASE` (consts).
+- Logging: use `log::{info, warn, error, debug}`; keep messages concise and actionable.
 
 ## Testing Guidelines
-- Framework: built-in Rust test harness via `cargo test`.
-- Locations: unit tests inline (`#[cfg(test)] mod tests`) and integration tests under `tests/`.
-- Conventions: functions named `test_*`; use `tempfile` for filesystem isolation.
-- Scope: cover CLI subcommands (new, update, info, diff, gh_*). Validate edge cases (missing remotes, HEAD without target).
+- Framework: built-in Rust harness via `cargo test`.
+- Location: unit tests inline (`#[cfg(test)]`); integration tests under `tests/`.
+- Conventions: name tests `test_*`; prefer `tempfile` for FS isolation and avoid network.
+- Scope: cover subcommands (`new`, `update`, `info`, `diff`, `gh_*`, `tag`) and edge cases (missing remotes, ambiguous HEAD).
 
 ## Commit & Pull Request Guidelines
-- Messages: imperative mood, concise summary; include scope when helpful (e.g., `fix: handle remote HEAD w/o target`).
-- Link issues: `Closes #123` in the body when applicable.
-- PRs: include description, rationale, CLI examples (before/after), and any screenshots/log snippets.
-- Pre-flight: run `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` before opening/merging.
+- Commits: imperative mood, concise scope (e.g., `feat(tag): push annotated tag`).
+- Link issues with `Closes #123` when applicable.
+- PRs: include rationale, CLI examples (before/after), and logs or screenshots.
+- Pre‑flight: `cargo fmt` • `cargo clippy -- -D warnings` • `cargo test`.
 
 ## Security & Configuration Tips
-- GitHub API: set `GITHUB_TOKEN` in your environment for `gh_*` commands.
-- Logging: set `RUST_LOG=info` (or `debug`) to troubleshoot.
-- Secrets: do not commit tokens; verify `.gitignore` excludes `target/`, virtual envs, and local tooling folders.
+- GitHub: set `GITHUB_TOKEN` for `gh_*` commands.
+- Diagnostics: set `RUST_LOG=info` (or `debug`) when troubleshooting.
+- Secrets: never commit tokens; confirm `.gitignore` covers `target/`, venvs, and local tooling.

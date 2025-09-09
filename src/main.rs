@@ -38,7 +38,7 @@ const RESET: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(
     name = "mdcode",
-    version = "1.8.0",
+    version = "1.9.0",
     about = "Martin's simple code management tool using Git.",
     arg_required_else_help = true,
     after_help = "\
@@ -254,17 +254,22 @@ fn run() -> Result<(), Box<dyn Error>> {
                     .to_string_lossy()
                     .to_string()
             };
-
-            let rt = Runtime::new()?;
-            let created_repo = rt.block_on(gh_create(&repo_name, description.clone()))?;
-            // Use the clone URL from the created repository.
-            let remote_url = created_repo
-                .clone_url
-                .ok_or("GitHub repository did not return a clone URL")?;
-            // Add the remote "origin" to the local repository.
-            add_remote(directory, "origin", remote_url.as_str())?;
-            // Automatically push the current branch.
-            gh_push(directory, "origin")?;
+            if gh_cli_available() {
+                log::info!("Detected GitHub CLI. Using 'gh repo create' flow.");
+                gh_create_via_cli(directory, &repo_name, description.clone())?;
+            } else {
+                log::info!("GitHub CLI not found. Falling back to API token auth.");
+                let rt = Runtime::new()?;
+                let created_repo = rt.block_on(gh_create_api(&repo_name, description.clone()))?;
+                // Use the HTTPS clone URL from the created repository.
+                let remote_url = created_repo
+                    .clone_url
+                    .ok_or("GitHub repository did not return a clone URL")?;
+                // Add the remote "origin" to the local repository.
+                add_remote(directory, "origin", remote_url.as_str())?;
+                // Automatically push the current branch.
+                gh_push(directory, "origin")?;
+            }
         }
         Commands::GhPush { directory, remote } => {
             log::info!(
@@ -1323,13 +1328,20 @@ fn create_temp_dir(prefix: &str) -> Result<PathBuf, Box<dyn Error>> {
 
 /// Create a GitHub repository using the GitHub API.
 ///
-/// Requires the environment variable GITHUB_TOKEN to be set.
+/// Tries `GITHUB_TOKEN` then `GH_TOKEN`. If neither is set, returns a helpful error
+/// suggesting to authenticate the GitHub CLI or set a token.
 /// Returns the created repository.
-async fn gh_create(
+async fn gh_create_api(
     name: &str,
     description: Option<String>,
 ) -> Result<octocrab::models::Repository, Box<dyn std::error::Error>> {
-    let token = std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN not set");
+    let token = std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .map_err(|_| {
+            "GitHub token not found. Install and authenticate GitHub CLI (`gh auth login`) \
+or set GITHUB_TOKEN/GH_TOKEN with repo scope."
+                .to_string()
+        })?;
     let octocrab = octocrab::Octocrab::builder()
         .personal_token(token)
         .build()?;
@@ -1361,6 +1373,46 @@ async fn gh_create(
         .await?;
     println!("Created GitHub repository: {}", repo.html_url);
     Ok(repo)
+}
+
+/// Check if GitHub CLI is available on PATH.
+fn gh_cli_available() -> bool {
+    Command::new("gh")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Create a GitHub repository using GitHub CLI and the system's authenticated credentials.
+/// This mirrors the existing flow by creating from the local directory, setting `origin`, and pushing.
+fn gh_create_via_cli(
+    directory: &str,
+    name: &str,
+    description: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = vec![
+        "repo",
+        "create",
+        name,
+        "--source",
+        directory,
+        "--remote",
+        "origin",
+        "--push",
+        "--confirm",
+    ];
+    // Respect user default visibility; include description if provided.
+    if let Some(desc) = description.as_deref() {
+        args.push("--description");
+        args.push(desc);
+    }
+    let status = Command::new("gh").args(&args).status()?;
+    if !status.success() {
+        return Err("GitHub CLI 'gh repo create' failed".into());
+    }
+    println!("Created GitHub repository via GitHub CLI and pushed to 'origin'.");
+    Ok(())
 }
 
 /// Add a remote to the local repository.
