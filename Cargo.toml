@@ -1,18 +1,22 @@
 [package]
 name = "mdcode"
-version = "1.2.0"
+version = "1.8.0"
 edition = "2021"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-git2 = "0.16"
+# Build without libgit2 HTTPS/SSH to avoid OpenSSL
+git2 = { version = "0.16", default-features = false }
 chrono = "0.4"
 walkdir = "2.3"
 env_logger = "0.10"
 log = "0.4"
-octocrab = "0.12"
+# Use rustls to avoid system OpenSSL dependency
+octocrab = { version = "0.12", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1.0"
+semver = "1.0"
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3.5"
