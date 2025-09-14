@@ -82,6 +82,11 @@ struct Cli {
     /// Perform a dry run (no changes will be made)
     #[arg(long)]
     dry_run: bool,
+
+    /// Maximum file size to auto-stage (in MB). Use to include large assets per-invocation.
+    /// Default: 50 MB.
+    #[arg(long = "max-file-mb", default_value_t = 50)]
+    max_file_mb: u64,
 }
 
 #[derive(Subcommand)]
@@ -225,12 +230,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     match &cli.command {
         Commands::New { directory } => {
             log::info!("Creating new repository in '{}'", directory);
-            new_repository(directory, cli.dry_run)?;
+            new_repository(directory, cli.dry_run, cli.max_file_mb)?;
         }
         Commands::Update { directory } => {
             log::info!("Updating repository in '{}'", directory);
             // In interactive use, pass None to prompt the user.
-            update_repository(directory, cli.dry_run, None)?;
+            update_repository(directory, cli.dry_run, None, cli.max_file_mb)?;
         }
         Commands::Info { directory } => {
             log::info!("Displaying repository info for '{}'", directory);
@@ -275,9 +280,15 @@ fn run() -> Result<(), Box<dyn Error>> {
             };
             // Determine visibility; default to private if unspecified.
             let mut selected = None;
-            if *public { selected = Some(RepoVisibility::Public); }
-            if *private { selected = Some(RepoVisibility::Private); }
-            if *internal { selected = Some(RepoVisibility::Internal); }
+            if *public {
+                selected = Some(RepoVisibility::Public);
+            }
+            if *private {
+                selected = Some(RepoVisibility::Private);
+            }
+            if *internal {
+                selected = Some(RepoVisibility::Internal);
+            }
             // If multiple flags were provided, return an error.
             let count = (*public as u8) + (*private as u8) + (*internal as u8);
             if count > 1 {
@@ -287,7 +298,13 @@ fn run() -> Result<(), Box<dyn Error>> {
 
             if let Some(gh_cmd) = gh_cli_path() {
                 log::info!("Detected GitHub CLI. Using 'gh repo create' flow.");
-                gh_create_via_cli(&gh_cmd, directory, &repo_name, description.clone(), visibility)?;
+                gh_create_via_cli(
+                    &gh_cmd,
+                    directory,
+                    &repo_name,
+                    description.clone(),
+                    visibility,
+                )?;
             } else {
                 log::info!("GitHub CLI not found. Falling back to API token auth.");
                 log::debug!("PATH: {}", env::var("PATH").unwrap_or_default());
@@ -611,6 +628,66 @@ mod tests_tag {
     }
 }
 
+#[cfg(test)]
+mod tests_detect_and_cap {
+    use super::*;
+    use std::io::Write as IoWrite;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_detect_file_type_audio_fonts_and_textlike() {
+        assert_eq!(detect_file_type(Path::new("x.wav")), Some("Audio"));
+        assert_eq!(detect_file_type(Path::new("x.MP3")), Some("Audio"));
+        assert_eq!(detect_file_type(Path::new("x.flac")), Some("Audio"));
+        assert_eq!(detect_file_type(Path::new("x.ipynb")), Some("Notebook"));
+        assert_eq!(detect_file_type(Path::new("x.proto")), Some("Protobuf"));
+        assert_eq!(detect_file_type(Path::new("x.gql")), Some("GraphQL"));
+        assert_eq!(detect_file_type(Path::new("x.thrift")), Some("Thrift"));
+        assert_eq!(detect_file_type(Path::new("x.r")), Some("R"));
+        assert_eq!(detect_file_type(Path::new("x.jl")), Some("Julia"));
+        assert_eq!(detect_file_type(Path::new("x.mm")), Some("Objective-C++"));
+        assert_eq!(detect_file_type(Path::new("x.ttf")), Some("Font"));
+        assert_eq!(detect_file_type(Path::new("x.woff2")), Some("Font"));
+    }
+
+    #[test]
+    fn test_detect_file_type_special_filenames() {
+        assert_eq!(detect_file_type(Path::new("LICENSE")), Some("License"));
+        assert_eq!(
+            detect_file_type(Path::new("Dockerfile")),
+            Some("Build Script")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("Makefile")),
+            Some("Build Script")
+        );
+        assert_eq!(detect_file_type(Path::new("CMakeLists.txt")), Some("CMake"));
+    }
+
+    #[test]
+    fn test_scan_source_files_respects_size_cap() {
+        let dir = tempdir().unwrap();
+        let d = dir.path();
+        // small recognized file
+        let mut f_small = File::create(d.join("small.wav")).unwrap();
+        f_small.write_all(&vec![0u8; 1024]).unwrap(); // 1 KB
+
+        // large recognized file (~2 MB)
+        let mut f_large = File::create(d.join("large.mp3")).unwrap();
+        f_large.write_all(&vec![1u8; 2 * 1024 * 1024]).unwrap();
+
+        // cap = 1 MB
+        let (files, count) = scan_source_files(d.to_str().unwrap(), 1).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(count, 1);
+        assert!(names.contains(&"small.wav".to_string()));
+        assert!(!names.contains(&"large.mp3".to_string()));
+    }
+}
+
 /// Returns true if any component of the entry's path is an excluded directory.
 ///
 /// The tool ignores common build and virtual environment folders: `target`,
@@ -627,7 +704,7 @@ fn is_in_excluded_dir(entry: &walkdir::DirEntry) -> bool {
 }
 
 /// Create a new repository and make an initial commit.
-fn new_repository(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
+fn new_repository(dir: &str, dry_run: bool, max_file_mb: u64) -> Result<(), Box<dyn Error>> {
     if !check_git_installed() {
         log::error!("Git is not installed. Please install Git from https://git-scm.com/downloads");
         return Err("Git not installed".into());
@@ -643,7 +720,7 @@ fn new_repository(dir: &str, dry_run: bool) -> Result<(), Box<dyn Error>> {
     }
 
     let total_files = scan_total_files(dir)?;
-    let (source_files, _source_count) = scan_source_files(dir)?;
+    let (source_files, _source_count) = scan_source_files(dir, max_file_mb)?;
 
     if !Path::new(dir).exists() {
         log::info!("Directory '{}' does not exist. Creating...", dir);
@@ -715,6 +792,7 @@ fn update_repository(
     dir: &str,
     dry_run: bool,
     commit_msg: Option<&str>,
+    max_file_mb: u64,
 ) -> Result<(), Box<dyn Error>> {
     let repo = match Repository::open(dir) {
         Ok(r) => r,
@@ -729,7 +807,7 @@ fn update_repository(
         }
     };
     log::info!("Staging changes...");
-    let (source_files, _) = scan_source_files(dir)?;
+    let (source_files, _) = scan_source_files(dir, max_file_mb)?;
     let _ = add_files_to_git(dir, &source_files, dry_run)?;
 
     let mut index = repo.index()?;
@@ -829,17 +907,31 @@ fn scan_total_files(dir: &str) -> Result<usize, Box<dyn Error>> {
 }
 
 /// Scan for source files (ignoring files under excluded directories).
-fn scan_source_files(dir: &str) -> Result<(Vec<PathBuf>, usize), Box<dyn Error>> {
+fn scan_source_files(dir: &str, max_file_mb: u64) -> Result<(Vec<PathBuf>, usize), Box<dyn Error>> {
     log::debug!("Scanning for source files in '{}'...", dir);
     let mut source_files = Vec::new();
     let mut count = 0;
+    let cap_bytes: u64 = max_file_mb.saturating_mul(1024).saturating_mul(1024);
     for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
         if is_in_excluded_dir(&entry) {
             continue;
         }
-        if entry.file_type().is_file() && detect_file_type(entry.path()).is_some() {
-            source_files.push(entry.path().to_path_buf());
-            count += 1;
+        if entry.file_type().is_file() {
+            let path = entry.path();
+            if detect_file_type(path).is_some() {
+                if let Ok(meta) = fs::metadata(path) {
+                    if meta.len() > cap_bytes {
+                        log::info!(
+                            "Ignoring '{}' as larger than {} MB - use '--max-file-mb'",
+                            path.display(),
+                            max_file_mb
+                        );
+                        continue;
+                    }
+                }
+                source_files.push(path.to_path_buf());
+                count += 1;
+            }
         }
     }
     log::debug!("{} source files found", count);
@@ -1135,10 +1227,19 @@ fn launch_diff_tool(before: &Path, after: &Path) -> Result<(), Box<dyn Error>> {
 /// Detect file type based on file extension.
 /// Returns a string representing the file’s category if recognized.
 fn detect_file_type(file_path: &Path) -> Option<&'static str> {
-    // Allow a file named "LICENSE" (case-insensitive) as a recognized type.
+    // Recognize special filenames without extensions.
     if let Some(file_name) = file_path.file_name()?.to_str() {
         if file_name.eq_ignore_ascii_case("LICENSE") {
             return Some("License");
+        }
+        if file_name.eq_ignore_ascii_case("Dockerfile") {
+            return Some("Build Script");
+        }
+        if file_name.eq_ignore_ascii_case("Makefile") {
+            return Some("Build Script");
+        }
+        if file_name.eq_ignore_ascii_case("CMakeLists.txt") {
+            return Some("CMake");
         }
     }
 
@@ -1164,6 +1265,15 @@ fn detect_file_type(file_path: &Path) -> Option<&'static str> {
         "sh" | "bash" | "zsh" => Some("Shell Script"),
         "bat" => Some("Batch Script"),
         "ps1" => Some("PowerShell"),
+        // Additional languages / build systems
+        "r" => Some("R"),
+        "jl" => Some("Julia"),
+        "mm" => Some("Objective-C++"),
+        "cmake" => Some("CMake"),
+        // APIs / IDL
+        "proto" => Some("Protobuf"),
+        "graphql" | "gql" => Some("GraphQL"),
+        "thrift" => Some("Thrift"),
         // Markup / Documentation
         "html" | "htm" => Some("HTML"),
         "css" | "scss" | "sass" | "less" => Some("CSS"),
@@ -1172,6 +1282,7 @@ fn detect_file_type(file_path: &Path) -> Option<&'static str> {
         "yml" | "yaml" => Some("YAML"),
         "toml" => Some("TOML"),
         "md" | "txt" | "rst" | "adoc" => Some("Documentation"),
+        "ipynb" => Some("Notebook"),
         // Configuration / Build
         "ini" | "cfg" | "conf" => Some("Configuration"),
         "sln" => Some("Solution File"),
@@ -1191,6 +1302,11 @@ fn detect_file_type(file_path: &Path) -> Option<&'static str> {
         "ico" => Some("Icon"),
         "cur" => Some("Cursor"),
         "dlg" => Some("Dialog File"),
+        // Audio
+        "wav" | "mp3" | "flac" | "aac" | "m4a" | "ogg" | "opus" | "aiff" | "aif" | "wma"
+        | "mid" | "midi" => Some("Audio"),
+        // Fonts
+        "ttf" | "otf" | "woff" | "woff2" => Some("Font"),
         _ => None,
     }
 }
@@ -1436,7 +1552,10 @@ fn gh_cli_path() -> Option<std::path::PathBuf> {
 
         // Try LocalAppData user install: %LOCALAPPDATA%\Programs\GitHub CLI\gh.exe
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            let p = Path::new(&local).join("Programs").join("GitHub CLI").join("gh.exe");
+            let p = Path::new(&local)
+                .join("Programs")
+                .join("GitHub CLI")
+                .join("gh.exe");
             if p.exists() {
                 return Some(p);
             }
@@ -1472,14 +1591,7 @@ fn gh_create_via_cli(
     visibility: RepoVisibility,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut args = vec![
-        "repo",
-        "create",
-        name,
-        "--source",
-        directory,
-        "--remote",
-        "origin",
-        "--push",
+        "repo", "create", name, "--source", directory, "--remote", "origin", "--push",
     ];
     // Respect user default visibility; include description if provided.
     if let Some(desc) = description.as_deref() {
@@ -1865,7 +1977,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let repo_path = temp_dir.path().join("repo");
         let repo_str = repo_path.to_str().unwrap();
-        new_repository(repo_str, false).unwrap();
+        new_repository(repo_str, false, 50).unwrap();
         assert!(
             Path::new(repo_str).join(".git").exists(),
             ".git directory should exist"
@@ -1885,11 +1997,11 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let repo_path = temp_dir.path().join("repo");
         let repo_str = repo_path.to_str().unwrap();
-        new_repository(repo_str, false).unwrap();
+        new_repository(repo_str, false, 50).unwrap();
         let file_path = repo_path.join("new_file.txt");
         fs::write(&file_path, "Hello, mdcode!").unwrap();
         // Provide a commit message to avoid hanging.
-        update_repository(repo_str, false, Some("Test commit message")).unwrap();
+        update_repository(repo_str, false, Some("Test commit message"), 50).unwrap();
         let repo = Repository::open(repo_str).unwrap();
         let mut revwalk = repo.revwalk().unwrap();
         revwalk.push_head().unwrap();
@@ -1909,10 +2021,10 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let repo_path = temp_dir.path().join("repo");
         let repo_str = repo_path.to_str().unwrap();
-        new_repository(repo_str, false).unwrap();
+        new_repository(repo_str, false, 50).unwrap();
         let file_path = repo_path.join("info_test.txt");
         fs::write(&file_path, "Test info output").unwrap();
-        update_repository(repo_str, false, Some("Test commit message")).unwrap();
+        update_repository(repo_str, false, Some("Test commit message"), 50).unwrap();
         info_repository(repo_str).unwrap();
     }
 }

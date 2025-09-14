@@ -22,6 +22,7 @@
 - **Release Tagging:** Create annotated git tags using the version from Cargo.toml or a provided version.
 - **Exclusion of Unwanted Files:** Automatically ignores directories like `target`, `bin`, `obj`, `venv`, `.venv`, and `env` so that build artifacts and virtual environments do not clutter your repository.
 - **Multi-Language Support:** Recognizes various file types (Rust, Python, C/C++, Java, etc.) to accurately identify source files.
+ - **Asset Support + Size Cap:** Recognizes audio (`wav`, `mp3`, `flac`, `aac`, `m4a`, `ogg`, `opus`, `aiff`, `aif`, `wma`, `mid`, `midi`) and fonts (`ttf`, `otf`, `woff`, `woff2`). Large files are skipped by default if larger than 50 MB; adjust with `--max-file-mb`.
 
 ## Installation
 
@@ -74,3 +75,8 @@ mdcode tag . --force
 # Create tag but do not push
 mdcode tag . --no-push
 ```
+
+## Configuration
+
+- `--max-file-mb <N>`: Set a per-run maximum size (in MB) for files that `new`/`update` will auto-stage. Default: `50`.
+  - Files exceeding the cap are skipped with a notice: `Ignoring '<path>' as larger than <N> MB - use '--max-file-mb'`.
