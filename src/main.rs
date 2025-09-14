@@ -26,7 +26,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tokio::runtime::Runtime;
-use walkdir::WalkDir;
+// walkdir remains for other areas; ignore's walker handles file scanning honoring .gitignore
+// use walkdir::WalkDir;
+use ignore::{gitignore::GitignoreBuilder, WalkBuilder as IgnoreWalkBuilder};
 
 // Define our uniform color constants.
 const BLUE: &str = "\x1b[94m"; // Light blue
@@ -405,20 +407,134 @@ fn read_version_from_cargo_toml(dir: &str) -> Result<Option<String>, Box<dyn Err
     Ok(None)
 }
 
-/// Check if working tree has uncommitted changes using `git status --porcelain`.
+/// Check if working tree has uncommitted changes in tracked files.
+/// Ignores untracked files and whitespace/EOL-only changes.
 #[allow(dead_code)]
 fn is_dirty(dir: &str) -> Result<bool, Box<dyn Error>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .arg("status")
-        .arg("--porcelain")
-        .arg("--untracked-files=no")
-        .output()?;
-    if !out.status.success() {
-        return Err("git status failed".into());
+    let repo = Repository::open(dir)?;
+    // No commits yet => not dirty for our purposes.
+    if repo.head().is_err() {
+        return Ok(false);
     }
-    Ok(!String::from_utf8_lossy(&out.stdout).trim().is_empty())
+
+    // First, use libgit2 statuses to see if any tracked files are modified or staged.
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(false)
+        .include_ignored(false)
+        .recurse_untracked_dirs(false)
+        .exclude_submodules(true)
+        .renames_head_to_index(true)
+        .show(git2::StatusShow::IndexAndWorkdir);
+    let statuses = repo.statuses(Some(&mut opts))?;
+    let mut has_candidate_changes = false;
+    for s in statuses.iter() {
+        let st = s.status();
+        if st.intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::INDEX_MODIFIED
+                | git2::Status::INDEX_DELETED
+                | git2::Status::INDEX_RENAMED
+                | git2::Status::INDEX_TYPECHANGE
+                | git2::Status::WT_MODIFIED
+                | git2::Status::WT_DELETED
+                | git2::Status::WT_RENAMED
+                | git2::Status::WT_TYPECHANGE,
+        ) {
+            has_candidate_changes = true;
+            break;
+        }
+    }
+    if !has_candidate_changes {
+        return Ok(false);
+    }
+
+    // If there are candidate changes, confirm by byte-compare after normalizing EOL.
+    let workdir = repo.workdir().ok_or("No workdir")?;
+    let head_tree = repo.head()?.peel_to_tree()?;
+
+    fn normalize_eol(data: Vec<u8>) -> Vec<u8> {
+        // Replace CRLF with LF
+        let mut out = Vec::with_capacity(data.len());
+        let mut i = 0;
+        while i < data.len() {
+            if i + 1 < data.len() && data[i] == b'\r' && data[i + 1] == b'\n' {
+                out.push(b'\n');
+                i += 2;
+            } else {
+                out.push(data[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    for s in statuses.iter() {
+        let st = s.status();
+        if !(st.intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::INDEX_MODIFIED
+                | git2::Status::INDEX_DELETED
+                | git2::Status::INDEX_RENAMED
+                | git2::Status::INDEX_TYPECHANGE
+                | git2::Status::WT_MODIFIED
+                | git2::Status::WT_DELETED
+                | git2::Status::WT_RENAMED
+                | git2::Status::WT_TYPECHANGE,
+        )) {
+            continue;
+        }
+        // If staged new/deleted/typechange exists, it is dirty.
+        if st.intersects(
+            git2::Status::INDEX_NEW | git2::Status::INDEX_DELETED | git2::Status::INDEX_TYPECHANGE,
+        ) {
+            #[cfg(test)]
+            eprintln!(
+                "is_dirty: staged-change status={:?} path={:?}",
+                st,
+                s.path()
+            );
+            return Ok(true);
+        }
+        // Compare HEAD blob vs workdir after normalizing EOL; if equal, ignore.
+        if let Some(rel) = s.path() {
+            let head_entry = head_tree.get_path(Path::new(rel));
+            if let Ok(head_entry) = head_entry {
+                if let Ok(blob) = repo.find_blob(head_entry.id()) {
+                    let head_bytes = normalize_eol(blob.content().to_vec());
+                    let wt_path = workdir.join(rel);
+                    if let Ok(wt_bytes_raw) = std::fs::read(&wt_path) {
+                        let wt_bytes = normalize_eol(wt_bytes_raw);
+                        if head_bytes == wt_bytes {
+                            continue; // spurious EOL-only change; ignore
+                        } else {
+                            #[cfg(test)]
+                            eprintln!(
+                                "is_dirty: content-diff path={} head_len={} wt_len={}",
+                                rel,
+                                head_bytes.len(),
+                                wt_bytes.len()
+                            );
+                            return Ok(true);
+                        }
+                    } else {
+                        #[cfg(test)]
+                        eprintln!("is_dirty: worktree read failed path={}", rel);
+                        return Ok(true);
+                    }
+                } else {
+                    #[cfg(test)]
+                    eprintln!("is_dirty: blob lookup failed path={}", rel);
+                    return Ok(true);
+                }
+            } else {
+                // Not found in HEAD (renamed?), consider dirty.
+                #[cfg(test)]
+                eprintln!("is_dirty: path not in HEAD: {}", rel);
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Normalize and validate a semver string, enforcing a leading 'v' in the tag.
@@ -598,9 +714,29 @@ mod tests_tag {
             .status()
             .unwrap();
 
+        // Ensure consistent line ending behavior on Windows to avoid false positives
+        // when checking for dirty state in tests.
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .arg("config")
+            .arg("core.autocrlf")
+            .arg("false")
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .arg("config")
+            .arg("core.filemode")
+            .arg("false")
+            .status()
+            .unwrap();
+
         // create tracked file and commit
         let mut tf = File::create(d.join("tracked.txt")).unwrap();
         writeln!(tf, "hello").unwrap();
+        drop(tf); // ensure contents are flushed before adding
         std::process::Command::new("git")
             .arg("-C")
             .arg(d)
@@ -624,6 +760,7 @@ mod tests_tag {
         // modify tracked file to make it dirty
         let mut tf2 = File::create(d.join("tracked.txt")).unwrap();
         writeln!(tf2, "more").unwrap();
+        drop(tf2);
         assert_eq!(is_dirty(d.to_str().unwrap()).unwrap(), true);
     }
 }
@@ -665,6 +802,18 @@ mod tests_detect_and_cap {
     }
 
     #[test]
+    fn test_detect_file_type_installer_scripts() {
+        assert_eq!(
+            detect_file_type(Path::new("setup.iss")),
+            Some("Installer Script")
+        );
+        assert_eq!(
+            detect_file_type(Path::new("SETUP.ISS")),
+            Some("Installer Script")
+        );
+    }
+
+    #[test]
     fn test_scan_source_files_respects_size_cap() {
         let dir = tempdir().unwrap();
         let d = dir.path();
@@ -686,21 +835,74 @@ mod tests_detect_and_cap {
         assert!(names.contains(&"small.wav".to_string()));
         assert!(!names.contains(&"large.mp3".to_string()));
     }
+
+    #[test]
+    fn test_scan_respects_gitignore() {
+        let dir = tempdir().unwrap();
+        let d = dir.path();
+        // Recognized file we will ignore via .gitignore
+        std::fs::write(d.join("README.md"), b"Ignored doc").unwrap();
+        std::fs::write(d.join(".gitignore"), b"# ignore readme\nREADME.md\n").unwrap();
+        // Another recognized file that should remain
+        std::fs::write(
+            d.join("Cargo.toml"),
+            b"[package]\nname='x'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+
+        let (files, _count) = scan_source_files(d.to_str().unwrap(), 50).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"Cargo.toml".to_string()));
+        assert!(!names.contains(&"README.md".to_string()));
+    }
+
+    #[test]
+    fn test_scan_ignores_target_ci() {
+        let dir = tempdir().unwrap();
+        let d = dir.path();
+        // Simulate Rust CI build artifact under target_ci
+        let fp = d.join("target_ci").join("debug").join(".fingerprint");
+        std::fs::create_dir_all(&fp).unwrap();
+        std::fs::write(fp.join("lib-anyhow.json"), b"{}").unwrap();
+        // A legitimate source/config file in the root
+        std::fs::write(
+            d.join("Cargo.toml"),
+            b"[package]\nname='x'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+
+        let (files, _count) = scan_source_files(d.to_str().unwrap(), 50).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.strip_prefix(d).unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "Cargo.toml"));
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains("target_ci") || n.contains(".fingerprint")),
+            "should ignore files under target_ci"
+        );
+    }
 }
 
 /// Returns true if any component of the entry's path is an excluded directory.
 ///
 /// The tool ignores common build and virtual environment folders: `target`,
-/// `bin`, `obj`, `venv`, `.venv`, and `env`.
-fn is_in_excluded_dir(entry: &walkdir::DirEntry) -> bool {
-    entry.path().components().any(|comp| {
-        comp.as_os_str() == "target"
-            || comp.as_os_str() == "bin"
-            || comp.as_os_str() == "obj"
-            || comp.as_os_str() == "venv"
-            || comp.as_os_str() == ".venv"
-            || comp.as_os_str() == "env"
-    })
+/// `target_ci` (Rust CI artifacts), `bin`, `obj`, `venv`, `.venv`, and `env`.
+fn is_in_excluded_path(path: &Path) -> bool {
+    path.components()
+        .any(|comp| match comp.as_os_str().to_str() {
+            Some("target") | Some("target_ci") => true,
+            Some("bin") | Some("obj") => true,
+            Some("venv") | Some(".venv") | Some("env") => true,
+            // Always skip VCS metadata directories if encountered during a walk.
+            Some(".git") | Some(".hg") | Some(".svn") => true,
+            _ => false,
+        })
 }
 
 /// Create a new repository and make an initial commit.
@@ -894,11 +1096,40 @@ fn update_repository(
 fn scan_total_files(dir: &str) -> Result<usize, Box<dyn Error>> {
     log::debug!("Scanning source tree in '{}'...", dir);
     let mut total = 0;
-    for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
-        if is_in_excluded_dir(&entry) {
+    // Build a local .gitignore matcher (best-effort); ignore walker should
+    // already respect .gitignore, but we also guard in-code to be explicit.
+    let gi = {
+        let mut b = GitignoreBuilder::new(dir);
+        let _ = b.add(Path::new(dir).join(".gitignore"));
+        b.build().ok()
+    };
+    for result in IgnoreWalkBuilder::new(dir)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .build()
+    {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if is_in_excluded_path(path) {
             continue;
         }
-        if entry.file_type().is_file() {
+        if let Some(ref m) = gi {
+            if m.matched_path_or_any_parents(
+                path,
+                entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false),
+            )
+            .is_ignore()
+            {
+                continue;
+            }
+        }
+        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             total += 1;
         }
     }
@@ -912,12 +1143,33 @@ fn scan_source_files(dir: &str, max_file_mb: u64) -> Result<(Vec<PathBuf>, usize
     let mut source_files = Vec::new();
     let mut count = 0;
     let cap_bytes: u64 = max_file_mb.saturating_mul(1024).saturating_mul(1024);
-    for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
-        if is_in_excluded_dir(&entry) {
+    let gi = {
+        let mut b = GitignoreBuilder::new(dir);
+        let _ = b.add(Path::new(dir).join(".gitignore"));
+        b.build().ok()
+    };
+    for result in IgnoreWalkBuilder::new(dir)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .build()
+    {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if is_in_excluded_path(path) {
             continue;
         }
-        if entry.file_type().is_file() {
-            let path = entry.path();
+        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            if let Some(ref m) = gi {
+                if m.matched_path_or_any_parents(path, false).is_ignore() {
+                    continue;
+                }
+            }
             if detect_file_type(path).is_some() {
                 if let Ok(meta) = fs::metadata(path) {
                     if meta.len() > cap_bytes {
@@ -1289,6 +1541,8 @@ fn detect_file_type(file_path: &Path) -> Option<&'static str> {
         "csproj" => Some("C# Project File"),
         "pom" => Some("Maven Project File"),
         "gradle" => Some("Gradle Build File"),
+        // Installer scripts
+        "iss" => Some("Installer Script"),
         // Database
         "sql" => Some("SQL"),
         // Images & Assets
@@ -1429,7 +1683,19 @@ fn generate_gitignore_content(_dir: &str) -> Result<String, Box<dyn Error>> {
     log::debug!("Generating .gitignore content...");
     // Ignore common build and virtual environment directories
     let ignore_patterns = [
-        "target/", "bin/", "obj/", "venv/", ".venv/", "env/", "*.tmp", "*.log",
+        // Rust/Cargo
+        "target/",
+        // CI builds for Rust that should never be checked in
+        "target_ci/",
+        // Generic build outputs and environments
+        "bin/",
+        "obj/",
+        "venv/",
+        ".venv/",
+        "env/",
+        // Common temporary/log files
+        "*.tmp",
+        "*.log",
     ];
     Ok(ignore_patterns.join("\n"))
 }
@@ -1526,7 +1792,7 @@ or set GITHUB_TOKEN/GH_TOKEN with repo scope."
 /// Locate the GitHub CLI executable if available.
 /// Returns a path to use when invoking the command.
 fn gh_cli_path() -> Option<std::path::PathBuf> {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     // 1) Try the name via PATH first.
     if let Ok(out) = Command::new("gh").arg("--version").output() {
@@ -1964,7 +2230,7 @@ mod tests {
     #[test]
     fn test_generate_gitignore_content() {
         let content = generate_gitignore_content(".").unwrap();
-        let expected = "target/\nbin/\nobj/\nvenv/\n.venv/\nenv/\n*.tmp\n*.log";
+        let expected = "target/\ntarget_ci/\nbin/\nobj/\nvenv/\n.venv/\nenv/\n*.tmp\n*.log";
         assert_eq!(content, expected);
     }
 

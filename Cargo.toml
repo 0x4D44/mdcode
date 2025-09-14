@@ -1,6 +1,6 @@
 [package]
 name = "mdcode"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 
 [dependencies]
@@ -9,6 +9,7 @@ clap = { version = "4", features = ["derive"] }
 git2 = { version = "0.16", default-features = false }
 chrono = "0.4"
 walkdir = "2.3"
+ignore = "0.4"
 env_logger = "0.10"
 log = "0.4"
 # Use rustls to avoid system OpenSSL dependency
