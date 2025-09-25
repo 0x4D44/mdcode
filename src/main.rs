@@ -814,6 +814,16 @@ mod tests_detect_and_cap {
     }
 
     #[test]
+    fn test_detect_file_type_lockfiles() {
+        assert_eq!(detect_file_type(Path::new("Cargo.lock")), Some("Lockfile"));
+        assert_eq!(
+            detect_file_type(Path::new("Gemfile.lock")),
+            Some("Lockfile")
+        );
+        assert_eq!(detect_file_type(Path::new("yarn.lock")), Some("Lockfile"));
+    }
+
+    #[test]
     fn test_scan_source_files_respects_size_cap() {
         let dir = tempdir().unwrap();
         let d = dir.path();
@@ -857,6 +867,22 @@ mod tests_detect_and_cap {
             .collect();
         assert!(names.contains(&"Cargo.toml".to_string()));
         assert!(!names.contains(&"README.md".to_string()));
+    }
+
+    #[test]
+    fn test_scan_includes_lockfiles() {
+        let dir = tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("Cargo.lock"), b"[[package]]").unwrap();
+        std::fs::write(d.join("Gemfile.lock"), b"GEM\n").unwrap();
+
+        let (files, _count) = scan_source_files(d.to_str().unwrap(), 50).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"Cargo.lock".to_string()));
+        assert!(names.contains(&"Gemfile.lock".to_string()));
     }
 
     #[test]
@@ -1533,6 +1559,7 @@ fn detect_file_type(file_path: &Path) -> Option<&'static str> {
         "json" => Some("JSON"),
         "yml" | "yaml" => Some("YAML"),
         "toml" => Some("TOML"),
+        "lock" => Some("Lockfile"),
         "md" | "txt" | "rst" | "adoc" => Some("Documentation"),
         "ipynb" => Some("Notebook"),
         // Configuration / Build
