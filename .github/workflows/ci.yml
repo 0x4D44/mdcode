@@ -29,5 +29,38 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      - name: Coverage
+        run: COVERAGE_SKIP_TARPAULIN=1 COVERAGE_OPTIONAL_TARPAULIN=1 make coverage
+
+      - name: LCOV export
+        run: make coverage-lcov
+
+      - name: Enforce LLVM ≥98% lines
+        run: make coverage-llvm-gate-98
+
+      - name: Upload coverage artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: target/coverage
+          retention-days: 5
+
+      - name: Coverage HTML
+        run: make coverage-html
+
+      - name: Upload coverage HTML
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-${{ github.sha }}
+          path: target/coverage/html
+          retention-days: 5
+
+      - name: Upload LCOV
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-${{ github.sha }}
+          path: target/coverage/lcov.info
+          retention-days: 5
+
       - name: Build release binary
         run: cargo build --release

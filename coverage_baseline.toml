@@ -1,0 +1,6 @@
+[baseline]
+tarpaulin_line = 43.49
+llvm_line = 98.47
+
+[threshold]
+max_drop = 5.0
