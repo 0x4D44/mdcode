@@ -1,5 +1,8 @@
 # mdcode
 
+![Coverage](https://img.shields.io/badge/coverage-98%25-brightgreen)
+[![CI](https://github.com/0x4D44/mdcode/actions/workflows/ci.yml/badge.svg)](https://github.com/0x4D44/mdcode/actions/workflows/ci.yml)
+
 **mdcode** is a simple code management tool built on top of Git, written in Rust. It provides a clean command-line interface for creating new repositories, updating commits, viewing repository history, performing diffs, and integrating seamlessly with GitHub. With built-in support for excluding build artifacts and virtual environments, mdcode helps keep your repository clean and focused on your source code.
 
 ## Table of Contents
